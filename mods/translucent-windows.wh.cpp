@@ -84,6 +84,11 @@ This is caused by default by the AccentBlur API.❕
       $name: Windows theme accent colorizer
       $description: >-
        Paint with accent color parts of windows theme. (Requires Windows theme custom rendering)
+    - PillAnimations: TRUE
+      $name: Pill indicator animations
+      $description: >-
+       Enable animated pill indicators in navigation pane.
+        Disable for static pills only. Also respects Windows animation settings.
   $name: Rendering Customization
 - type: acrylicblur
   $name: Background translucent effects
@@ -326,9 +331,6 @@ This is caused by default by the AccentBlur API.❕
 #include <d2d1.h>
 #include <wrl.h>
 #include <ShellScalingApi.h>
-#include <thread>
-#include <chrono>
-#include <atomic>
 
 #define RECTWIDTH(lprc)     ((lprc)->right - (lprc)->left)
 #define RECTHEIGHT(lprc)    ((lprc)->bottom - (lprc)->top)
@@ -412,6 +414,7 @@ struct Settings{
     BOOL FillBg = FALSE;
     BOOL AccentColorize = FALSE;
     COLORREF AccentColor = 0xFFFFFFFF;
+    BOOL PillAnimations = TRUE;
     BOOL TextAlphaBlend = FALSE;
     BOOL SetSystemColors = FALSE;
     COLORREF AccentBlurBehindClr = 0x00000000;
@@ -570,35 +573,36 @@ DOUBLE TimerGetSeconds() {
     return TimerGetCycles() * g_recipCyclesPerSecond;
 }
 
-// ── Pill animation (vertical open/close) ────────────────────────────────────
-//
-// A animação roda numa thread separada usando UpdateLayeredWindow.
-// Duas fases: o pill fecha (encolhe) na posição antiga e abre (expande) na nova.
-//
+// ── Pill animation (WinUI-style stretchy indicator) ─────────────────────────
 static const FLOAT  PILL_H_FRAC = 0.48f;
-static const DOUBLE PILL_DUR    = 0.25;   // duração total (close + open)
-static const int    PILL_COL_W  = 8;
+static const DOUBLE PILL_DUR    = 0.30;
+static const DOUBLE PILL_TRAIL  = 0.38;
 
 static int    g_pillCurTop  = -99999;
 static int    g_pillPrevTop = -99999;
 static int    g_pillItemH   = 32;
-static LPARAM g_pillCurItem = 0;   // HTREEITEM do item selecionado atual
+static LPARAM g_pillCurItem = 0;
 
-static HWND                 g_pillTreeHWND   = nullptr;
-static HWND                 g_pillOverlay    = nullptr;
-static std::atomic<UINT>    g_pillGeneration {0};
-static std::atomic<bool>    g_pillAnimating  {false};
-static BOOL                 g_animEnabled    = -1;
-static bool                 g_overlayClassReg = false;
-static D2D1_COLOR_F         g_pillAccentColor = {0.4f, 0.8f, 1.0f, 1.0f};
+static DOUBLE   g_pillAnimStart = 0.0;
+static UINT_PTR g_pillTimer     = 0;
+static HWND     g_pillTreeHWND  = nullptr;
+static BOOL     g_animEnabled   = -1;
 
-// Protege o par (checagem de geração + UpdateLayeredWindow) contra race condition.
-static std::mutex           g_pillULWMutex;
+// Delta-invalidation: rastreia bounds visuais do frame anterior
+// para invalidar apenas as faixas que mudaram entre frames
+static float g_pillLastVTop    = 0.0f;
+static float g_pillLastVBot    = 0.0f;
+static bool  g_pillLastValid   = false;
 
-static const wchar_t* PILL_OVERLAY_CLS = L"WH_PillOverlay";
+// RT cacheado para desenho do pill — evita CreateDCRenderTarget() a cada frame
+static ID2D1DCRenderTarget* g_pillCachedRT = nullptr;
+
+// RT cacheado para fundo de seleção do TreeView — evita CreateDCRenderTarget() por paint
+static ID2D1DCRenderTarget* g_selCachedRT = nullptr;
 
 static BOOL PillAnimationsEnabled()
 {
+    if (!g_settings.PillAnimations) return FALSE;
     if (g_animEnabled == -1)
     {
         BOOL enabled = TRUE;
@@ -610,206 +614,205 @@ static BOOL PillAnimationsEnabled()
 
 static void PillInvalidateAnimCache() { g_animEnabled = -1; }
 
-// Ease-out quártico para abertura — desaceleração suave ao chegar
-static FLOAT EaseOutQuart(DOUBLE t)
+// ── Tab pill (static) ────────────────────────────────────────────────────────
+static const FLOAT TAB_PILL_FRAC = 0.40f;
+
+static ID2D1DCRenderTarget* g_tabCachedRT = nullptr;
+
+static ID2D1DCRenderTarget* TabGetCachedRT(HDC hdc, LPCRECT pRect)
+{
+    if (!g_tabCachedRT && g_d2dFactory)
+    {
+        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE, D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &g_tabCachedRT)))
+            g_tabCachedRT = nullptr;
+    }
+    if (g_tabCachedRT && FAILED(g_tabCachedRT->BindDC(hdc, pRect)))
+        return nullptr;
+    return g_tabCachedRT;
+}
+
+// Obtém o RT cacheado para o pill, criando se necessário.
+// Muito mais barato que CreateDCRenderTarget() a cada frame — só faz BindDC().
+static ID2D1DCRenderTarget* PillGetCachedRT(HDC hdc, LPCRECT pRect)
+{
+    if (!g_pillCachedRT && g_d2dFactory)
+    {
+        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0,
+            D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+            D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &g_pillCachedRT)))
+            g_pillCachedRT = nullptr;
+    }
+    if (g_pillCachedRT)
+    {
+        if (FAILED(g_pillCachedRT->BindDC(hdc, pRect)))
+            return nullptr;
+    }
+    return g_pillCachedRT;
+}
+
+// RT cacheado para o fundo de seleção — mesma lógica de BindDC.
+static ID2D1DCRenderTarget* SelGetCachedRT(HDC hdc, LPCRECT pRect)
+{
+    if (!g_selCachedRT && g_d2dFactory)
+    {
+        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0,
+            D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+            D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &g_selCachedRT)))
+            g_selCachedRT = nullptr;
+    }
+    if (g_selCachedRT)
+    {
+        if (FAILED(g_selCachedRT->BindDC(hdc, pRect)))
+            return nullptr;
+    }
+    return g_selCachedRT;
+}
+
+static FLOAT EaseOutExpo(DOUBLE t)
+{
+    if (t <= 0.0) return 0.0f;
+    if (t >= 1.0) return 1.0f;
+    return (FLOAT)(1.0 - pow(2.0, -10.0 * t));
+}
+
+// Ease-out cúbico para a cauda — forte desaceleração, efeito "puxada elástica"
+static FLOAT EaseOutCubic(DOUBLE t)
 {
     if (t <= 0.0) return 0.0f;
     if (t >= 1.0) return 1.0f;
     DOUBLE inv = 1.0 - t;
-    return (FLOAT)(1.0 - inv * inv * inv * inv);
+    return (FLOAT)(1.0 - inv * inv * inv);
 }
 
-// Ease-in quadrático para fechamento — começa suave, acelera ao fechar
-static FLOAT EaseInQuad(DOUBLE t)
+// Borda líder e traseira do pill virtual em coordenadas TV
+static void PillGetVirtualBounds(DOUBLE t, float itemH, float* outTop, float* outBottom)
 {
-    if (t <= 0.0) return 0.0f;
-    if (t >= 1.0) return 1.0f;
-    return (FLOAT)(t * t);
-}
-
-// Renderiza um frame da animação no overlay.
-// t ∈ [0,1]: fase close (0→0.5) e fase open (0.5→1.0).
-// pBrush: brush pré-criado pela thread (reutilizado por frame; nullptr = cria localmente).
-// Retorna false apenas quando a geração mudou (sinal para a thread parar).
-// Em erros D2D → retorna true sem chamar ULW (overlay mantém frame anterior visível).
-static bool PillOverlayFrame(HWND overlay, HDC hdcMem, void* pBits,
-                             ID2D1DCRenderTarget* pRT,
-                             int w, int h, DOUBLE t, UINT generation,
-                             int prevTop, int curTop, int itemH,
-                             D2D1_COLOR_F accentColor, float scale,
-                             ID2D1SolidColorBrush* pBrush = nullptr)
-{
-    if (g_pillGeneration.load() != generation) return false;
-
     float halfPad = itemH * (1.0f - PILL_H_FRAC) / 2.0f;
-    float pillW   = 3.2f * scale;
-    float pillX   = 1.8f;
+    float fromY1  = (float)g_pillPrevTop + halfPad;
+    float fromY2  = (float)g_pillPrevTop + itemH - halfPad;
+    float toY1    = (float)g_pillCurTop  + halfPad;
+    float toY2    = (float)g_pillCurTop  + itemH - halfPad;
 
-    float vTop, vBottom;
+    float leadT  = EaseOutExpo(t);
+    float trailT = EaseOutCubic(t > PILL_TRAIL ? (t - PILL_TRAIL) / (1.0 - PILL_TRAIL) : 0.0);
 
-    if (t <= 0.5)
+    if (g_pillCurTop > g_pillPrevTop)
     {
-        // Fase close: pill encolhe no centro da posição ANTIGA
-        float progress = EaseInQuad(t / 0.5);
-        float center   = (float)prevTop + (float)itemH / 2.0f;
-        float fullHalf = ((float)itemH - halfPad * 2.0f) / 2.0f;
-        float curHalf  = fullHalf * (1.0f - progress);
-        vTop    = center - curHalf;
-        vBottom = center + curHalf;
+        *outBottom = fromY2 + (toY2 - fromY2) * leadT;
+        *outTop    = fromY1 + (toY1 - fromY1) * trailT;
     }
     else
     {
-        // Fase open: pill expande do centro da posição NOVA
-        float progress = EaseOutQuart((t - 0.5) / 0.5);
-        float center   = (float)curTop + (float)itemH / 2.0f;
-        float fullHalf = ((float)itemH - halfPad * 2.0f) / 2.0f;
-        float curHalf  = fullHalf * progress;
-        vTop    = center - curHalf;
-        vBottom = center + curHalf;
+        *outTop    = fromY1 + (toY1 - fromY1) * leadT;
+        *outBottom = fromY2 + (toY2 - fromY2) * trailT;
     }
-
-    if (vTop    < 0.0f)     vTop    = 0.0f;
-    if (vBottom > (float)h) vBottom = (float)h;
-
-    memset(pBits, 0, w * h * 4);
-
-    if (vBottom - vTop > 0.5f && pRT)
-    {
-        RECT rc = {0, 0, w, h};
-        if (FAILED(pRT->BindDC(hdcMem, &rc))) return true;
-
-        Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> localBrush;
-        ID2D1SolidColorBrush* brush = pBrush;
-        if (!brush)
-        {
-            if (FAILED(pRT->CreateSolidColorBrush(accentColor, &localBrush))) return true;
-            brush = localBrush.Get();
-        }
-
-        pRT->BeginDraw();
-        pRT->Clear(D2D1::ColorF(0, 0.0f));
-        pRT->FillRoundedRectangle(
-            D2D1::RoundedRect(
-                D2D1::RectF(pillX, vTop, pillX + pillW, vBottom),
-                pillW / 2.0f, pillW / 2.0f),
-            brush);
-        if (FAILED(pRT->EndDraw())) return true;
-    }
-
-    // Lock: torna a checagem final de geração + ULW atômicos.
-    // Sem isso a thread antiga pode estar entre a checagem (acima) e o ULW
-    // quando a main thread incrementa a geração — o ULW residual sobrescreveria.
-    {
-        std::lock_guard<std::mutex> lock(g_pillULWMutex);
-        if (g_pillGeneration.load() != generation) return false;
-
-        POINT ptSrc = {0, 0};
-        SIZE  sz    = {w, h};
-        BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-        UpdateLayeredWindow(overlay, nullptr, nullptr, &sz,
-                            hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
-    }
-    return true;
 }
 
-// Thread de animação do pill.
-// Usa sleep_until para limitar a ~60 fps sem depender de DwmFlush —
-// que em alguns drivers retorna imediatamente, causaria spin e múltiplos
-// ULW por vsync (glitches durante o fechamento).
-static void PillAnimThread(HWND overlay, HWND tree, UINT generation,
-                           int prevTop, int curTop, int itemH,
-                           D2D1_COLOR_F accentColor, float scale)
+static bool IsPillTreeInsideExplorer()
 {
-    RECT treeRc;
-    if (!GetClientRect(tree, &treeRc)) return;
-    int h = treeRc.bottom;
-    if (h <= 0) return;
-
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMem    = CreateCompatibleDC(hdcScreen);
-    ReleaseDC(nullptr, hdcScreen);
-
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = PILL_COL_W;
-    bmi.bmiHeader.biHeight      = -h;
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void*   pBits = nullptr;
-    HBITMAP hbm   = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
-    if (!hbm) { DeleteDC(hdcMem); return; }
-    SelectObject(hdcMem, hbm);
-
-    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pCachedRT;
-    if (g_d2dFactory)
-    {
-        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        g_d2dFactory->CreateDCRenderTarget(&rtProps, &pCachedRT);
-    }
-
-    // Brush criado uma vez — elimina alocação por frame e falhas intermitentes
-    // de CreateSolidColorBrush que causavam frames transparentes (flash).
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> pCachedBrush;
-    if (pCachedRT)
-        pCachedRT->CreateSolidColorBrush(accentColor, &pCachedBrush);
-
-    // Cadência de ~60 fps via sleep_until com tempo absoluto.
-    // Não usa DwmFlush (comportamento inconsistente entre drivers) nem
-    // Sleep(1) puro (resolução de 15ms sem timeBeginPeriod).
-    // Se um frame demorar mais que 16ms, o próximo frame ocorre imediatamente
-    // (catch-up sem acumular atraso), garantindo que t sempre avança.
-    using Clock = std::chrono::steady_clock;
-    static constexpr auto FRAME_DUR = std::chrono::microseconds(16667); // ~60 fps
-
-    auto t0        = Clock::now();
-    auto nextFrame = t0 + FRAME_DUR;
-
-    for (;;)
-    {
-        if (g_pillGeneration.load() != generation) break;
-
-        float elapsed = std::chrono::duration<float>(
-            Clock::now() - t0).count();
-        DOUBLE t = elapsed / PILL_DUR;
-        bool   done = (t >= 1.0);
-        if (done) t = 1.0;
-
-        if (IsWindow(overlay))
-        {
-            if (!PillOverlayFrame(overlay, hdcMem, pBits, pCachedRT.Get(),
-                                  PILL_COL_W, h, t, generation,
-                                  prevTop, curTop, itemH, accentColor, scale,
-                                  pCachedBrush.Get()))
-                break;
-        }
-
-        if (done) break;
-
-        auto now = Clock::now();
-        if (nextFrame > now)
-            std::this_thread::sleep_until(nextFrame);
-        else
-            nextFrame = now; // frame atrasado: catch-up sem acumular débito
-        nextFrame += FRAME_DUR;
-    }
-
-    if (g_pillGeneration.load() == generation)
-    {
-        g_pillAnimating.store(false);
-        // Não esconde o overlay aqui — PaintTreeViewButton detecta que a animação
-        // terminou e esconde o overlay + desenha o pill estático na mesma chamada
-        // de paint, eliminando o gap de um frame que causava flicker.
-        if (IsWindow(tree))
-            InvalidateRect(tree, nullptr, FALSE);
-    }
-
-    DeleteDC(hdcMem);
-    DeleteObject(hbm);
+    if (!g_pillTreeHWND || !IsWindow(g_pillTreeHWND)) return false;
+    HWND root = GetAncestor(g_pillTreeHWND, GA_ROOT);
+    if (!root) return false;
+    wchar_t cls[64] = {};
+    GetClassNameW(root, cls, 64);
+    return (_wcsicmp(cls, L"CabinetWClass") == 0 ||
+            _wcsicmp(cls, L"ExploreWClass") == 0);
 }
 
+static void CALLBACK PillTimerProc(HWND, UINT, UINT_PTR id, DWORD)
+{
+    bool finished = (TimerGetSeconds() - g_pillAnimStart >= PILL_DUR);
+    if (finished)
+    {
+        KillTimer(NULL, id);
+        g_pillTimer   = 0;
+        g_pillPrevTop = g_pillCurTop;
+    }
+
+    if (!g_pillTreeHWND || !IsWindow(g_pillTreeHWND))
+    {
+        g_pillTreeHWND  = nullptr;
+        g_pillLastValid = false;
+        return;
+    }
+
+    float vTop, vBottom;
+    {
+        DOUBLE t = (TimerGetSeconds() - g_pillAnimStart) / PILL_DUR;
+        if (t > 1.0) t = 1.0;
+        if (!finished)
+            PillGetVirtualBounds(t, (float)g_pillItemH, &vTop, &vBottom);
+        else
+        {
+            float h       = (float)g_pillItemH;
+            float halfPad = h * (1.0f - PILL_H_FRAC) / 2.0f;
+            vTop    = (float)g_pillCurTop + halfPad;
+            vBottom = (float)g_pillCurTop + h - halfPad;
+        }
+    }
+
+    if (g_pillLastValid && !finished)
+    {
+        float dTop = vTop - g_pillLastVTop;
+        float dBot = vBottom - g_pillLastVBot;
+        if (dTop * dTop + dBot * dBot < 0.06f) return;
+    }
+
+    FLOAT dpiScale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
+    int pillRight = (int)ceilf((1.8f + 3.2f) * dpiScale) + 2;
+
+    if (g_pillLastValid)
+    {
+        int dT1 = (int)floorf(g_pillLastVTop < vTop ? g_pillLastVTop : vTop) - 1;
+        int dT2 = (int)ceilf (g_pillLastVTop > vTop ? g_pillLastVTop : vTop) + 1;
+        int dB1 = (int)floorf(g_pillLastVBot < vBottom ? g_pillLastVBot : vBottom) - 1;
+        int dB2 = (int)ceilf (g_pillLastVBot > vBottom ? g_pillLastVBot : vBottom) + 1;
+
+        if (dB1 <= dT2)
+        {
+            RECT rc = { 0, dT1, pillRight, dB2 };
+            RedrawWindow(g_pillTreeHWND, &rc, nullptr,
+                         RDW_INVALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_NOCHILDREN);
+        }
+        else
+        {
+            RECT rcTop = { 0, dT1, pillRight, dT2 };
+            RECT rcBot = { 0, dB1, pillRight, dB2 };
+            RedrawWindow(g_pillTreeHWND, &rcTop, nullptr,
+                         RDW_INVALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_NOCHILDREN);
+            RedrawWindow(g_pillTreeHWND, &rcBot, nullptr,
+                         RDW_INVALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_NOCHILDREN);
+        }
+    }
+    else
+    {
+        int top    = g_pillPrevTop < g_pillCurTop ? g_pillPrevTop : g_pillCurTop;
+        int bottom = (g_pillPrevTop > g_pillCurTop ? g_pillPrevTop : g_pillCurTop)
+                     + g_pillItemH;
+        RECT rc = { 0, top, pillRight, bottom };
+        RedrawWindow(g_pillTreeHWND, &rc, nullptr,
+                     RDW_INVALIDATE | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_NOCHILDREN);
+    }
+
+    g_pillLastVTop  = vTop;
+    g_pillLastVBot  = vBottom;
+    g_pillLastValid = !finished;
+}
+
+// Busca SysTreeView32 — primeiro tenta janelas Explorer/diálogo conhecidas,
+// depois fallback para qualquer janela visível do thread
 static BOOL CALLBACK FindTreeViewChildProc(HWND hwnd, LPARAM lParam)
 {
     wchar_t cls[64] = {};
@@ -823,6 +826,7 @@ static BOOL CALLBACK FindTreeViewEnumProc(HWND hwnd, LPARAM lParam)
 {
     wchar_t cls[64] = {};
     GetClassNameW(hwnd, cls, 64);
+    // Explorer principal, diálogos comuns de arquivo, e outros diálogos Win32
     if (_wcsicmp(cls, L"CabinetWClass")  == 0 ||
         _wcsicmp(cls, L"ExploreWClass")  == 0 ||
         _wcsicmp(cls, L"#32770")         == 0 ||
@@ -839,364 +843,6 @@ static HWND PillFindTreeView()
     HWND found = nullptr;
     EnumThreadWindows(GetCurrentThreadId(), FindTreeViewEnumProc, (LPARAM)&found);
     return found;
-}
-
-static void PillEnsureOverlay(HWND tree)
-{
-    if (!g_overlayClassReg)
-    {
-        WNDCLASSEXW wc  = {};
-        wc.cbSize        = sizeof(wc);
-        wc.lpfnWndProc   = DefWindowProcW;
-        wc.hInstance     = (HINSTANCE)GetModuleHandleW(nullptr);
-        wc.lpszClassName = PILL_OVERLAY_CLS;
-        RegisterClassExW(&wc);
-        g_overlayClassReg = true;
-    }
-
-    if (g_pillOverlay && IsWindow(g_pillOverlay)) return;
-
-    RECT treeRc;
-    GetClientRect(tree, &treeRc);
-
-    g_pillOverlay = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-        PILL_OVERLAY_CLS, nullptr,
-        WS_CHILD,
-        0, 0, PILL_COL_W, treeRc.bottom,
-        tree, nullptr, (HINSTANCE)GetModuleHandleW(nullptr), nullptr);
-}
-
-static void PillStartAnim(HWND tree)
-{
-    PillEnsureOverlay(tree);
-    if (!g_pillOverlay) return;
-
-    RECT treeRc;
-    GetClientRect(tree, &treeRc);
-    int h = treeRc.bottom;
-
-    int          prevTop = g_pillPrevTop;
-    int          curTop  = g_pillCurTop;
-    int          itemH   = g_pillItemH;
-    D2D1_COLOR_F accent  = g_pillAccentColor;
-    float        scale   = (float)g_Dpi / USER_DEFAULT_SCREEN_DPI;
-
-    // Incrementa geração ANTES do frame síncrono t=0:
-    // a thread anterior, ao tentar adquirir g_pillULWMutex,
-    // encontrará geração diferente e descartará o ULW sem sobrescrever.
-    g_pillAnimating.store(true);
-    UINT gen     = ++g_pillGeneration;
-    HWND overlay = g_pillOverlay;
-
-    // Renderiza t=0 sincronamente (overlay ainda oculto) —
-    // o overlay aparece já com o primeiro frame correto, sem pisca.
-    {
-        HDC hdcTmp = CreateCompatibleDC(nullptr);
-        BITMAPINFO bmi = {};
-        bmi.bmiHeader.biSize   = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth  = PILL_COL_W;
-        bmi.bmiHeader.biHeight = -h;
-        bmi.bmiHeader.biPlanes = 1;
-        bmi.bmiHeader.biBitCount = 32;
-        void* pBits = nullptr;
-        HBITMAP hbm = CreateDIBSection(hdcTmp, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
-        if (hbm)
-        {
-            SelectObject(hdcTmp, hbm);
-            D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
-                D2D1_RENDER_TARGET_TYPE_DEFAULT,
-                D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-            Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRT;
-            if (g_d2dFactory && SUCCEEDED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &pRT)))
-                PillOverlayFrame(overlay, hdcTmp, pBits, pRT.Get(),
-                                 PILL_COL_W, h, 0.0, gen,
-                                 prevTop, curTop, itemH, accent, scale);
-            DeleteDC(hdcTmp);
-            DeleteObject(hbm);
-        }
-        else
-            DeleteDC(hdcTmp);
-    }
-
-    SetWindowPos(overlay, HWND_TOP, 0, 0,
-                 PILL_COL_W, h,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
-    std::thread([overlay, tree, gen, prevTop, curTop, itemH, accent, scale]() {
-        PillAnimThread(overlay, tree, gen, prevTop, curTop, itemH, accent, scale);
-    }).detach();
-}
-
-// ── Drag-hover dot animation ────────────────────────────────────────────────
-// Quando arrastamos arquivos sobre um item do painel de navegação, uma bolinha
-// cinza opaca aparece com crescimento rápido e encolhe ao sair.
-
-static const DOUBLE DRAG_DOT_DUR   = 0.12;  // duração de grow/shrink
-static const FLOAT  DRAG_DOT_FRAC  = 0.30f; // fração da altura do item (indicador curto)
-static const wchar_t* DRAG_OVERLAY_CLS = L"WH_DragDotOverlay";
-
-static HWND                 g_dragOverlay    = nullptr;
-static std::atomic<UINT>    g_dragGeneration {0};
-static std::atomic<bool>    g_dragAnimating  {false};
-static int                  g_dragCurTop     = -99999;
-static LPARAM               g_dragCurItem    = 0;  // HTREEITEM do drop-target atual
-static bool                 g_dragClassReg   = false;
-
-// Fases da animação de drag
-enum DragPhase { DRAG_GROW, DRAG_IDLE, DRAG_SHRINK };
-
-static bool DragDotRenderFrame(HWND overlay, HDC hdcMem, void* pBits,
-                               ID2D1DCRenderTarget* pRT,
-                               int w, int h, UINT generation,
-                               int targetTop, int itemH, float scale,
-                               float sizeFrac, ID2D1SolidColorBrush* pBrush)
-{
-    if (g_dragGeneration.load() != generation) return false;
-
-    memset(pBits, 0, w * h * 4);
-
-    float pillW    = 3.2f * scale;
-    float pillX    = 1.8f;
-    float center   = (float)targetTop + (float)itemH / 2.0f;
-    float maxHalf  = (float)itemH * DRAG_DOT_FRAC / 2.0f;
-    float curHalf  = maxHalf * sizeFrac;
-
-    float vTop    = center - curHalf;
-    float vBottom = center + curHalf;
-    if (vTop    < 0.0f)     vTop    = 0.0f;
-    if (vBottom > (float)h) vBottom = (float)h;
-
-    if (vBottom - vTop > 0.3f && pRT && pBrush)
-    {
-        RECT rc = {0, 0, w, h};
-        if (FAILED(pRT->BindDC(hdcMem, &rc))) return true;
-        pRT->BeginDraw();
-        pRT->Clear(D2D1::ColorF(0, 0.0f));
-        pRT->FillRoundedRectangle(
-            D2D1::RoundedRect(
-                D2D1::RectF(pillX, vTop, pillX + pillW, vBottom),
-                pillW / 2.0f, pillW / 2.0f),
-            pBrush);
-        if (FAILED(pRT->EndDraw())) return true;
-    }
-
-    if (g_dragGeneration.load() != generation) return false;
-
-    POINT ptSrc = {0, 0};
-    SIZE  sz    = {w, h};
-    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    UpdateLayeredWindow(overlay, nullptr, nullptr, &sz,
-                        hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
-    return true;
-}
-
-// Thread de animação do drag dot — grow, idle, detect exit, shrink
-static void DragDotThread(HWND overlay, HWND tree, UINT generation,
-                          LPARAM hItem, int targetTop, int itemH, float scale)
-{
-    RECT treeRc;
-    if (!GetClientRect(tree, &treeRc)) return;
-    int h = treeRc.bottom;
-    if (h <= 0) return;
-
-    HDC hdcScreen = GetDC(nullptr);
-    HDC hdcMem    = CreateCompatibleDC(hdcScreen);
-    ReleaseDC(nullptr, hdcScreen);
-
-    BITMAPINFO bmi = {};
-    bmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth       = PILL_COL_W;
-    bmi.bmiHeader.biHeight      = -h;
-    bmi.bmiHeader.biPlanes      = 1;
-    bmi.bmiHeader.biBitCount    = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    void*   pBits = nullptr;
-    HBITMAP hbm   = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
-    if (!hbm) { DeleteDC(hdcMem); return; }
-    SelectObject(hdcMem, hbm);
-
-    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pCachedRT;
-    if (g_d2dFactory)
-    {
-        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
-            D2D1_RENDER_TARGET_TYPE_DEFAULT,
-            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        g_d2dFactory->CreateDCRenderTarget(&rtProps, &pCachedRT);
-    }
-
-    // Brush criado uma vez — cor fixa, não precisa recriar por frame.
-    static const D2D1_COLOR_F DOT_COLOR = {0.55f, 0.55f, 0.55f, 0.65f};
-    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> pCachedBrush;
-    if (pCachedRT)
-        pCachedRT->CreateSolidColorBrush(DOT_COLOR, &pCachedBrush);
-
-    constexpr UINT   TVM_GETNEXTITEM_  = 0x110A;
-    constexpr UINT   TVM_GETITEMRECT_  = 0x1104;
-    constexpr WPARAM TVGN_DROPHILITE_  = 0x0008;
-
-    DragPhase phase = DRAG_GROW;
-    int  curDrawTop = targetTop;
-
-    using Clock = std::chrono::steady_clock;
-    static constexpr auto DRAG_FRAME_DUR = std::chrono::microseconds(16667); // ~60 fps
-
-    auto phaseStart = Clock::now();
-    auto nextFrame  = phaseStart + DRAG_FRAME_DUR;
-
-    for (;;)
-    {
-        if (g_dragGeneration.load() != generation) break;
-
-        float elapsed = std::chrono::duration<float>(
-            Clock::now() - phaseStart).count();
-
-        float sizeFrac = 0.0f;
-        bool  done     = false;
-
-        switch (phase)
-        {
-        case DRAG_GROW:
-        {
-            float t = (float)(elapsed / DRAG_DOT_DUR);
-            if (t >= 1.0f) t = 1.0f;
-            sizeFrac = EaseOutQuart(t);
-            if (t >= 1.0f) phase = DRAG_IDLE;
-            break;
-        }
-        case DRAG_IDLE:
-        {
-            sizeFrac = 1.0f;
-            if (IsWindow(tree))
-            {
-                HTREEITEM hDrop = (HTREEITEM)SendMessageW(
-                    tree, TVM_GETNEXTITEM_, TVGN_DROPHILITE_, 0);
-                if (!hDrop || (LPARAM)hDrop != hItem)
-                {
-                    // Drop-target mudou ou drag terminou → encolher
-                    phase = DRAG_SHRINK;
-                    phaseStart = Clock::now();
-                }
-                else
-                {
-                    // Mesma HTREEITEM — re-query posição (pode ter mudado por expansão)
-                    RECT dropRc = {};
-                    *(HTREEITEM*)&dropRc = hDrop;
-                    if (SendMessageW(tree, TVM_GETITEMRECT_, TRUE, (LPARAM)&dropRc))
-                        curDrawTop = dropRc.top;
-                }
-            }
-            break;
-        }
-        case DRAG_SHRINK:
-        {
-            float t = (float)(elapsed / DRAG_DOT_DUR);
-            if (t >= 1.0f) { t = 1.0f; done = true; }
-            sizeFrac = 1.0f - EaseOutQuart(t);
-            break;
-        }
-        }
-
-        if (IsWindow(overlay))
-        {
-            if (!DragDotRenderFrame(overlay, hdcMem, pBits, pCachedRT.Get(),
-                                    PILL_COL_W, h, generation,
-                                    curDrawTop, itemH, scale, sizeFrac,
-                                    pCachedBrush.Get()))
-                break;
-        }
-
-        if (done) break;
-
-        auto now = Clock::now();
-        if (nextFrame > now)
-            std::this_thread::sleep_until(nextFrame);
-        else
-            nextFrame = now;
-        nextFrame += DRAG_FRAME_DUR;
-    }
-
-    // Limpa overlay e esconde
-    if (IsWindow(overlay))
-    {
-        memset(pBits, 0, PILL_COL_W * h * 4);
-        POINT ptSrc = {0, 0};
-        SIZE  sz    = {PILL_COL_W, h};
-        BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-        UpdateLayeredWindow(overlay, nullptr, nullptr, &sz,
-                            hdcMem, &ptSrc, 0, &blend, ULW_ALPHA);
-    }
-
-    if (g_dragGeneration.load() == generation)
-    {
-        g_dragAnimating.store(false);
-        g_dragCurTop  = -99999;
-        g_dragCurItem = 0;
-    }
-
-    DeleteDC(hdcMem);
-    DeleteObject(hbm);
-}
-
-static void DragEnsureOverlay(HWND tree)
-{
-    if (!g_dragClassReg)
-    {
-        WNDCLASSEXW wc = {};
-        wc.cbSize        = sizeof(wc);
-        wc.lpfnWndProc   = DefWindowProcW;
-        wc.hInstance     = (HINSTANCE)GetModuleHandleW(nullptr);
-        wc.lpszClassName = DRAG_OVERLAY_CLS;
-        RegisterClassExW(&wc);
-        g_dragClassReg = true;
-    }
-
-    if (g_dragOverlay && IsWindow(g_dragOverlay)) return;
-
-    RECT treeRc;
-    GetClientRect(tree, &treeRc);
-
-    g_dragOverlay = CreateWindowExW(
-        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-        DRAG_OVERLAY_CLS, nullptr,
-        WS_CHILD,
-        0, 0, PILL_COL_W, treeRc.bottom,
-        tree, nullptr, (HINSTANCE)GetModuleHandleW(nullptr), nullptr);
-}
-
-static void DragStartAnim(HWND tree, LPARAM hItem, int targetTop, int itemH)
-{
-    DragEnsureOverlay(tree);
-    if (!g_dragOverlay) return;
-
-    RECT treeRc;
-    GetClientRect(tree, &treeRc);
-    int h = treeRc.bottom;
-
-    SetWindowPos(g_dragOverlay, HWND_TOP, 0, 0,
-                 PILL_COL_W, h,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-
-    g_dragAnimating.store(true);
-    g_dragCurTop  = targetTop;
-    g_dragCurItem = hItem;
-    UINT  gen   = ++g_dragGeneration;
-    HWND  ov    = g_dragOverlay;
-    float scale = (float)g_Dpi / USER_DEFAULT_SCREEN_DPI;
-
-    std::thread([ov, tree, gen, hItem, targetTop, itemH, scale]() {
-        DragDotThread(ov, tree, gen, hItem, targetTop, itemH, scale);
-    }).detach();
-}
-
-static void DragHideOverlay()
-{
-    ++g_dragGeneration;
-    g_dragAnimating.store(false);
-    g_dragCurTop  = -99999;
-    g_dragCurItem = 0;
-    if (g_dragOverlay && IsWindow(g_dragOverlay))
-        ShowWindow(g_dragOverlay, SW_HIDE);
 }
 
 using NtUserCreateWindowEx_t = HWND(WINAPI*)(DWORD, PUNICODE_STRING, LPCWSTR, PUNICODE_STRING, DWORD, LONG, LONG, LONG, LONG, HWND, HMENU, HINSTANCE, LPVOID, DWORD, DWORD, DWORD, VOID*);
@@ -2445,6 +2091,7 @@ HRESULT WINAPI HookedGetColorTheme(HTHEME hTheme, INT iPartId, INT iStateId, INT
                 *pColor = RGB(96, 0, 0);
             return S_OK;
         }
+        return hr;
     }
     else if (ThemeClassName == L"MonthCal") {
         return hr;
@@ -3736,14 +3383,63 @@ BOOL PaintTab(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     if (iPartId == TABP_PANE || !g_d2dFactory)
         return FALSE;
 
-    INT index = (iStateId == TIS_NORMAL) ? 0 
-              : (iStateId == TIS_HOT) ? 1 : (iStateId == TIS_DISABLED) ? 2 : 3;
+    BOOL isSelected = (iStateId == TIS_SELECTED || iStateId == TIS_FOCUSED);
+    BOOL isHot      = (iStateId == TIS_HOT);
 
-    if (!g_themeCache.tab[index])
-        if (!g_themeCache.CacheTab(hdc, iStateId, index))
-            return FALSE;
-    RECT newRc = {pRect->left-1, pRect->top-1, pRect->right+1, pRect->bottom+1};
-    DrawNineGridStretch(hdc, g_themeCache.tab[index], &newRc, 9, 9, 8, 8);
+    if (!isSelected && !isHot)
+    {
+        INT index = (iStateId == TIS_NORMAL) ? 0 : 2;
+        if (!g_themeCache.tab[index])
+            if (!g_themeCache.CacheTab(hdc, iStateId, index))
+                return FALSE;
+        RECT newRc = {pRect->left-1, pRect->top-1, pRect->right+1, pRect->bottom+1};
+        DrawNineGridStretch(hdc, g_themeCache.tab[index], &newRc, 9, 9, 8, 8);
+        return TRUE;
+    }
+
+    FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
+    FLOAT cornerRadius = 4.f * scale;
+
+    ID2D1DCRenderTarget* pRT = TabGetCachedRT(hdc, pRect);
+    if (!pRT) return FALSE;
+
+    FLOAT w = (FLOAT)RECTWIDTH(pRect);
+    FLOAT h = (FLOAT)RECTHEIGHT(pRect);
+    FLOAT inset = 3.0f;
+
+    D2D1_COLOR_F fillColor = MyD2D1Color(48, 144, 144, 144);
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+    pRT->CreateSolidColorBrush(fillColor, &brush);
+
+    pRT->BeginDraw();
+    pRT->FillRoundedRectangle(
+        D2D1::RoundedRect(
+            D2D1::RectF(inset, inset, w - inset, h - inset),
+            cornerRadius, cornerRadius),
+        brush.Get());
+
+    if (isSelected)
+    {
+        FLOAT pillHeight = 2.8f * scale;
+        FLOAT pillBottom = h - inset - 0.5f;
+        FLOAT pillTop    = pillBottom - pillHeight;
+        FLOAT pillRadius = pillHeight / 2.0f;
+
+        FLOAT bgW   = w - inset * 2.0f;
+        FLOAT pillW  = bgW * TAB_PILL_FRAC;
+        if (pillW < 14.0f * scale) pillW = 14.0f * scale;
+        if (pillW > bgW - 2.0f) pillW = bgW - 2.0f;
+        FLOAT pillLeft = inset + (bgW - pillW) / 2.0f;
+
+        brush->SetColor(IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2));
+        pRT->FillRoundedRectangle(
+            D2D1::RoundedRect(
+                D2D1::RectF(pillLeft, pillTop, pillLeft + pillW, pillBottom),
+                pillRadius, pillRadius),
+            brush.Get());
+    }
+
+    pRT->EndDraw();
     return TRUE;
 }
 
@@ -3776,30 +3472,6 @@ BOOL CThemeCache::CacheTab(HDC hdc, INT iStateId, INT stateIndex)
         pRenderTarget->CreateSolidColorBrush(fillColor, &brush);
         D2D1_ROUNDED_RECT tabRect = D2D1::RoundedRect(D2D1::RectF(0, 0, width, height), cornerRadius, cornerRadius);
         pRenderTarget->FillRoundedRectangle(tabRect, brush.Get());
-    }
-    else if (iStateId == TIS_SELECTED || iStateId == TIS_FOCUSED)
-    {
-        const FLOAT desiredHeight = 2.0f;       
-        const FLOAT widthPadding  = 5.0f;
-        const FLOAT verticalOffset = 2.0f;      
-    
-        FLOAT pillLeft   = widthPadding;
-        FLOAT pillRight  = width - widthPadding;
-        FLOAT pillBottom = height - verticalOffset;
-        FLOAT pillTop    = pillBottom - desiredHeight;
-
-        FLOAT pillHeight = desiredHeight;
-        FLOAT radius     = pillHeight / 2.0f * scale;
-
-        D2D1_ROUNDED_RECT pillRect = D2D1::RoundedRect(
-            D2D1::RectF(pillLeft, pillTop, pillRight, pillBottom),
-            radius, radius
-        );
-
-        D2D1_COLOR_F pillColor = IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2);
-        Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-        pRenderTarget->CreateSolidColorBrush(pillColor, &brush);
-        pRenderTarget->FillRoundedRectangle(pillRect, brush.Get());
     }
     auto hr = pRenderTarget->EndDraw();
     if (FAILED(hr)) {Wh_Log(L"Failed D2D drawing [ERROR]: 0x%08X\n", hr); return FALSE;}
@@ -4423,65 +4095,72 @@ BOOL PaintTreeViewButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     int   itemH       = RECTHEIGHT(pRect);
     if (itemH > 0) g_pillItemH = itemH;
 
-    // ── Drag detection via drop-highlight item rect ──────────────────────
-    constexpr UINT   TVM_GETNEXTITEM_  = 0x110A;
-    constexpr UINT   TVM_GETITEMRECT_  = 0x1104;
-    constexpr WPARAM TVGN_DROPHILITE_  = 0x0008;
-
-    // Valida HWND para drag (leve — só IsWindowVisible)
-    HWND dragTree = g_pillTreeHWND;
-    if (dragTree && !IsWindowVisible(dragTree))
+    // Helper lambda: desenha a fatia do pill virtual que sobrepõe pRect.
+    // Se pExistingRT != nullptr e betweenBeginEnd == true, usa o RT já aberto
+    // (merge com o draw do fundo de seleção → elimina um RT por frame).
+    // Caso contrário, usa o RT cacheado (g_pillCachedRT via BindDC — muito
+    // mais barato que CreateDCRenderTarget a cada frame).
+    auto DrawPillSlice = [&](ID2D1DCRenderTarget* pExistingRT = nullptr,
+                             bool betweenBeginEnd = false)
     {
-        dragTree = PillFindTreeView();
-        if (dragTree != g_pillTreeHWND)
+        bool isAnimating = (animEnabled && g_pillTimer);
+        float vTop, vBottom;
+        DOUBLE animT = 0.0;
+        if (isAnimating)
         {
-            g_pillTreeHWND = dragTree;
-            g_pillCurTop   = -99999;
-            g_pillCurItem  = 0;
-            ++g_pillGeneration;
-            g_pillAnimating.store(false);
-            if (g_pillOverlay) { DestroyWindow(g_pillOverlay); g_pillOverlay = nullptr; }
-            DragHideOverlay();
-            if (g_dragOverlay) { DestroyWindow(g_dragOverlay); g_dragOverlay = nullptr; }
+            animT = (TimerGetSeconds() - g_pillAnimStart) / PILL_DUR;
+            if (animT > 1.0) animT = 1.0;
+            PillGetVirtualBounds(animT, (float)g_pillItemH, &vTop, &vBottom);
         }
-    }
-
-    bool isDragging    = false;
-    int  dropItemTop   = -99999;
-    LPARAM dropHItem   = 0;
-    if (dragTree)
-    {
-        HTREEITEM hDropItem = (HTREEITEM)SendMessageW(
-            dragTree, TVM_GETNEXTITEM_, TVGN_DROPHILITE_, 0);
-        if (hDropItem)
+        else
         {
-            // Distingue drag real de clique: durante D&D, o mouse capture
-            // pertence à janela fonte (não ao TreeView). Durante clique normal,
-            // o TreeView tem o capture.
-            HWND captured = GetCapture();
-            bool isRealDrag = captured && captured != dragTree;
-
-            if (isRealDrag)
-            {
-                RECT dropRc = {};
-                *(HTREEITEM*)&dropRc = hDropItem;
-                if (SendMessageW(dragTree, TVM_GETITEMRECT_, TRUE, (LPARAM)&dropRc))
-                {
-                    dropItemTop = dropRc.top;
-                    dropHItem   = (LPARAM)hDropItem;
-                    // Não mostra drag dot no item já selecionado
-                    if (dropItemTop != g_pillCurTop)
-                        isDragging = true;
-                    else if (g_dragCurItem != 0)
-                        DragHideOverlay();  // voltou ao item selecionado
-                }
-            }
+            float h       = (float)g_pillItemH;
+            float halfPad = h * (1.0f - PILL_H_FRAC) / 2.0f;
+            vTop    = (float)g_pillCurTop + halfPad;
+            vBottom = (float)g_pillCurTop + h - halfPad;
         }
-    }
 
-    // Drag-hover: inicia dot se o drop-target (HTREEITEM) mudou
-    if (isDragging && animEnabled && dropHItem != g_dragCurItem && dragTree)
-        DragStartAnim(dragTree, dropHItem, dropItemTop, itemH);
+        float iTop    = (float)pRect->top;
+        float iBottom = (float)pRect->bottom;
+        float clipTop    = vTop    < iTop    ? iTop    : vTop;
+        float clipBottom = vBottom > iBottom ? iBottom : vBottom;
+        if (clipBottom - clipTop < 0.5f) return;
+
+        float localTop    = clipTop    - iTop;
+        float localBottom = clipBottom - iTop;
+
+        ID2D1DCRenderTarget* pRT = pExistingRT;
+        if (!pRT)
+        {
+            pRT = PillGetCachedRT(hdc, pRect);
+            if (!pRT) return;
+        }
+
+        float pillW = 3.2f * scale;
+        float pillX = 1.8f;
+
+        // Subtle trailing thinning: pill slightly narrows during movement
+        if (isAnimating)
+        {
+            // Cubic ease-out: 70% → 100% width, very smooth transition
+            float inv = 1.0f - (float)animT;
+            float thinFactor = 0.70f + 0.30f * (1.0f - inv * inv * inv);
+            float centerX = pillX + pillW / 2.0f;
+            pillW *= thinFactor;
+            pillX = centerX - pillW / 2.0f;
+        }
+
+        D2D1_COLOR_F accentColor = IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2);
+        Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+        pRT->CreateSolidColorBrush(accentColor, &brush);
+        if (!betweenBeginEnd) pRT->BeginDraw();
+        pRT->FillRoundedRectangle(
+            D2D1::RoundedRect(
+                D2D1::RectF(pillX, localTop, pillX + pillW, localBottom),
+                pillW / 2.0f, pillW / 2.0f),
+            brush.Get());
+        if (!betweenBeginEnd) pRT->EndDraw();
+    };
 
     // ── Item não selecionado ──────────────────────────────────────────────
     if (!isSelected)
@@ -4501,12 +4180,14 @@ BOOL PaintTreeViewButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
         else
             DrawNineGridStretch(hdc, g_themeCache.treeview[index], pRect, 9, 9, 8, 8);
 
+        // Pill em trânsito pode sobrepor itens não-selecionados durante o stretch
+        if (g_pillTimer) DrawPillSlice();
+
         return TRUE;
     }
 
     // ── Item selecionado ──────────────────────────────────────────────────
 
-    // Valida TreeView HWND — detecta mudança de aba / nova janela
     {
         HWND currentTree = PillFindTreeView();
         if (currentTree != g_pillTreeHWND)
@@ -4514,44 +4195,41 @@ BOOL PaintTreeViewButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
             g_pillTreeHWND = currentTree;
             g_pillCurTop   = -99999;
             g_pillCurItem  = 0;
-            ++g_pillGeneration;
-            g_pillAnimating.store(false);
-            if (g_pillOverlay) { DestroyWindow(g_pillOverlay); g_pillOverlay = nullptr; }
-            DragHideOverlay();
-            if (g_dragOverlay) { DestroyWindow(g_dragOverlay); g_dragOverlay = nullptr; }
         }
     }
 
-    // Seleção normal — não atualiza pill durante drag
-    if (pRect->top != g_pillCurTop && !isDragging)
+    if (pRect->top != g_pillCurTop)
     {
-        bool isFirstEver = (g_pillCurTop == -99999);
+        constexpr UINT   TVM_GETNEXTITEM_  = 0x110A;
+        constexpr WPARAM TVGN_DROPHILITE_  = 0x0008;
+        constexpr WPARAM TVGN_CARET_       = 0x0009;
+        bool isDragging = g_pillTreeHWND &&
+            SendMessageW(g_pillTreeHWND, TVM_GETNEXTITEM_, TVGN_DROPHILITE_, 0) != 0;
 
-        // Distingue mudança real de seleção de layout shift (pasta expandida
-        // move o item selecionado sem que o usuário clique em outro item).
-        // Se o HTREEITEM selecionado é o mesmo de antes, é layout shift:
-        // atualiza a posição sem animar. Caso contrário, anima normalmente.
-        constexpr WPARAM TVGN_CARET_ = 0x0009;
-        LPARAM curItem = g_pillTreeHWND
-            ? (LPARAM)SendMessageW(g_pillTreeHWND, TVM_GETNEXTITEM_, TVGN_CARET_, 0)
-            : 0;
-        bool isSameItem = (!isFirstEver && curItem != 0 && curItem == g_pillCurItem);
+        if (!isDragging)
+        {
+            bool isFirstEver = (g_pillCurTop == -99999);
 
-        g_pillPrevTop   = isFirstEver ? pRect->top : g_pillCurTop;
-        g_pillCurTop    = pRect->top;
-        g_pillCurItem   = curItem;
+            LPARAM curItem = g_pillTreeHWND
+                ? (LPARAM)SendMessageW(g_pillTreeHWND, TVM_GETNEXTITEM_, TVGN_CARET_, 0)
+                : 0;
+            bool isSameItem = (!isFirstEver && curItem != 0 && curItem == g_pillCurItem);
 
-        g_pillAccentColor = IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2);
+            g_pillPrevTop   = (isFirstEver || isSameItem) ? pRect->top : g_pillCurTop;
+            g_pillCurTop    = pRect->top;
+            g_pillCurItem   = curItem;
+            g_pillAnimStart = TimerGetSeconds();
 
-        if (!isFirstEver && !isSameItem && animEnabled && g_pillTreeHWND)
-            PillStartAnim(g_pillTreeHWND);
-        // isSameItem (layout shift): g_pillCurTop já foi atualizado;
-        // o pill estático abaixo desenhará na posição correta neste mesmo repaint.
+            if (g_pillTimer) KillTimer(NULL, g_pillTimer);
+            g_pillLastValid = false;
+            if (animEnabled && !isFirstEver && !isSameItem && IsPillTreeInsideExplorer())
+                g_pillTimer = SetTimer(NULL, 0, 10, PillTimerProc);
+        }
     }
 
-    // Fundo de seleção
-    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
-    if (FAILED(CreateBoundD2DRenderTarget(hdc, pRect, g_d2dFactory, &pRenderTarget)))
+    // Fundo de seleção + Pill numa única sessão D2D (RT cacheado)
+    ID2D1DCRenderTarget* pRenderTarget = SelGetCachedRT(hdc, pRect);
+    if (!pRenderTarget)
         return FALSE;
 
     FLOAT width  = (FLOAT)RECTWIDTH(pRect);
@@ -4568,51 +4246,11 @@ BOOL PaintTreeViewButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     pRenderTarget->FillRoundedRectangle(
         D2D1::RoundedRect(D2D1::RectF(padX, 0, width - padX, height), cr, cr),
         brush.Get());
+
+    // Pill desenhado no mesmo BeginDraw/EndDraw — zero RT extra
+    DrawPillSlice(pRenderTarget, true);
+
     pRenderTarget->EndDraw();
-
-    // Animação em curso: overlay cuida do pill, não interferir
-    if (g_pillAnimating.load())
-        return TRUE;
-
-    // Animação terminou (ou não havia animação).
-    // Se a posição não bate, só esconde o overlay (layout shift já tratado acima)
-    if (pRect->top != g_pillCurTop)
-    {
-        if (g_pillOverlay && IsWindow(g_pillOverlay) && IsWindowVisible(g_pillOverlay))
-            ShowWindow(g_pillOverlay, SW_HIDE);
-        return TRUE;
-    }
-
-    // Posição correta: desenha o pill estático no DC do item PRIMEIRO,
-    // depois esconde o overlay. Assim o DWM nunca compõe um frame sem pill:
-    // quando o overlay sai o pill estático já está no backing store do TreeView.
-    {
-        float h       = (float)height;
-        float halfPad = h * (1.0f - PILL_H_FRAC) / 2.0f;
-        float pillW   = 3.2f * scale;
-        float pillX   = 1.8f;
-        float pillY   = halfPad;
-        float pillH   = h - halfPad * 2.0f;
-
-        Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRT2;
-        if (SUCCEEDED(CreateBoundD2DRenderTarget(hdc, pRect, g_d2dFactory, &pRT2)))
-        {
-            Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> pillBrush;
-            pRT2->CreateSolidColorBrush(
-                IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2), &pillBrush);
-            pRT2->BeginDraw();
-            pRT2->FillRoundedRectangle(
-                D2D1::RoundedRect(
-                    D2D1::RectF(pillX, pillY, pillX + pillW, pillY + pillH),
-                    pillW / 2.0f, pillW / 2.0f),
-                pillBrush.Get());
-            pRT2->EndDraw();
-        }
-    }
-
-    // Pill estático já está no DC — agora é seguro esconder o overlay.
-    if (g_pillOverlay && IsWindow(g_pillOverlay) && IsWindowVisible(g_pillOverlay))
-        ShowWindow(g_pillOverlay, SW_HIDE);
 
     return TRUE;
 }
@@ -6490,11 +6128,6 @@ LRESULT CALLBACK CallWndProc(INT nCode, WPARAM wParam, LPARAM lParam)
             SendMessage(cwp->hwnd, g_msgRainbowTimer, RAINBOW_RESTART, 0);
             break;
         }
-        case WM_SETTINGCHANGE:
-        {
-            PillInvalidateAnimCache();
-            break;
-        }
         case WM_DESTROY:
         {       
            RainbowData* pRainbowWndData = reinterpret_cast<RainbowData*>(RemovePropW(cwp->hwnd, g_RainbowPropStr.c_str()));
@@ -6512,6 +6145,12 @@ LRESULT CALLBACK CallWndProc(INT nCode, WPARAM wParam, LPARAM lParam)
                 Wh_Log(L"[ERROR] Timer termination failure for window: %p", cwp->hwnd);
 
             RemoveOrUnloadFlyoutSubclass(cwp->hwnd);
+            break;
+        }
+        case WM_SETTINGCHANGE:
+        {
+            // Re-read animation preference if accessibility settings changed
+            PillInvalidateAnimCache();
             break;
         }
         default:
@@ -7083,6 +6722,7 @@ VOID LoadSettings()
        g_settings.AccentColorize = GetAccentColor(g_settings.AccentColor);
 
     g_settings.FillBg = Wh_GetIntSetting(L"RenderingMod.ThemeBackground");
+    g_settings.PillAnimations = Wh_GetIntSetting(L"RenderingMod.PillAnimations");
     
     g_settings.SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
     
@@ -7192,12 +6832,9 @@ VOID Wh_ModAfterInit()
 VOID Wh_ModUninit(VOID) 
 { 
     g_settings.Unload = TRUE;
-    // Sinaliza thread de animação para parar e destrói o overlay
-    ++g_pillGeneration;
-    if (g_pillOverlay) { DestroyWindow(g_pillOverlay); g_pillOverlay = nullptr; }
-    // Stop drag animation and destroy drag overlay
-    ++g_dragGeneration;
-    if (g_dragOverlay) { DestroyWindow(g_dragOverlay); g_dragOverlay = nullptr; }
+    if (g_pillCachedRT) { g_pillCachedRT->Release(); g_pillCachedRT = nullptr; }
+    if (g_selCachedRT)  { g_selCachedRT->Release();  g_selCachedRT  = nullptr; }
+    if (g_tabCachedRT)  { g_tabCachedRT->Release();  g_tabCachedRT  = nullptr; }
 
     if (g_settings.FillBg)
         g_d2dFactory->Release();
@@ -7229,6 +6866,9 @@ VOID Wh_ModUninit(VOID)
         RainbowWindows.clear();
     }
     
+    if (g_pillTimer) { KillTimer(NULL, g_pillTimer); g_pillTimer = 0; }
+    g_pillLastValid = false;
+
     RemoveOrUnloadWindowsHooks(TRUE);
     RemoveOrUnloadFlyoutSubclass(nullptr, TRUE);    
     ApplyForExistingWindows();
