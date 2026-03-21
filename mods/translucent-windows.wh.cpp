@@ -6,7 +6,7 @@
 // @author          Undisputed00x
 // @github          https://github.com/Undisputed00x
 // @include         *
-// @compilerOptions -ldwmapi -luxtheme -lcomctl32 -lgdi32 -ld2d1 -lmsimg32 -lshcore
+// @compilerOptions -ldwmapi -luxtheme -lcomctl32 -lgdi32 -ld2d1 -lmsimg32 -lshcore -lwinmm
 // ==/WindhawkMod==
 
 // ==WindhawkModReadme==
@@ -84,6 +84,16 @@ This is caused by default by the AccentBlur API.❕
       $name: Windows theme accent colorizer
       $description: >-
        Paint with accent color parts of windows theme. (Requires Windows theme custom rendering)
+    - PillAnimations: winui
+      $name: Pill animation style
+      $description: >-
+       Animation style for pill indicators in navigation pane.
+        Also respects Windows animation settings.
+      $options:
+      - winui: WinUI elastic
+      - expand: Vertical expand
+      - slide: Smooth slide
+      - none: No animation
   $name: Rendering Customization
 - type: acrylicblur
   $name: Background translucent effects
@@ -319,6 +329,7 @@ This is caused by default by the AccentBlur API.❕
 #include <vssym32.h>
 #include <uxtheme.h>
 #include <random>
+#include <timeapi.h>
 #include <string>
 #include <array>
 #include <mutex>
@@ -409,6 +420,8 @@ struct Settings{
     BOOL FillBg = FALSE;
     BOOL AccentColorize = FALSE;
     COLORREF AccentColor = 0xFFFFFFFF;
+    // 0=none, 1=winui, 2=expand, 3=slide
+    INT  PillAnimStyle = 1;
     BOOL TextAlphaBlend = FALSE;
     BOOL SetSystemColors = FALSE;
     COLORREF AccentBlurBehindClr = 0x00000000;
@@ -565,6 +578,349 @@ DOUBLE TimerGetCycles() {
 
 DOUBLE TimerGetSeconds() {
     return TimerGetCycles() * g_recipCyclesPerSecond;
+}
+
+// ── Pill animation (WinUI-style stretchy indicator) ─────────────────────────
+static const FLOAT  PILL_H_FRAC = 0.48f;
+static const DOUBLE PILL_DUR    = 0.32;
+static const DOUBLE PILL_TRAIL  = 0.25;
+
+static int    g_pillCurTop  = -99999;
+static int    g_pillPrevTop = -99999;
+static int    g_pillItemH   = 32;
+static LPARAM g_pillCurItem = 0;
+
+static DOUBLE   g_pillAnimStart = 0.0;
+static UINT_PTR g_pillTimer     = 0;
+static HWND     g_pillTreeHWND  = nullptr;
+static BOOL     g_animEnabled   = -1;
+
+// Thread-safe snapshots: captured at animation start, read by thread
+static volatile int    g_pillSnapPrevTop = 0;
+static volatile int    g_pillSnapCurTop  = 0;
+static volatile int    g_pillSnapItemH   = 32;
+static volatile int    g_pillSnapStyle   = 1;
+
+// Delta-invalidation: tracks visual bounds from previous frame
+// to invalidate only the strips that changed between frames
+static float g_pillLastVTop    = 0.0f;
+static float g_pillLastVBot    = 0.0f;
+static bool  g_pillLastValid   = false;
+
+// Cached RT for pill drawing — avoids CreateDCRenderTarget() per frame
+static ID2D1DCRenderTarget* g_pillCachedRT = nullptr;
+
+// Cached RT for TreeView selection background — avoids CreateDCRenderTarget() per paint
+static ID2D1DCRenderTarget* g_selCachedRT = nullptr;
+
+static INT PillAnimStyle()
+{
+    if (g_settings.PillAnimStyle == 0) return 0;
+    if (g_animEnabled == -1)
+    {
+        BOOL enabled = TRUE;
+        SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &enabled, 0);
+        g_animEnabled = enabled;
+    }
+    return g_animEnabled ? g_settings.PillAnimStyle : 0;
+}
+
+static void PillInvalidateAnimCache() { g_animEnabled = -1; }
+
+// ── Tab pill (static, no animation) ──────────────────────────────────────
+static const FLOAT TAB_PILL_FRAC = 0.40f;
+
+static ID2D1DCRenderTarget* g_tabCachedRT = nullptr;
+
+static ID2D1DCRenderTarget* TabGetCachedRT(HDC hdc, LPCRECT pRect)
+{
+    if (!g_tabCachedRT && g_d2dFactory)
+    {
+        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0, D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE, D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &g_tabCachedRT)))
+            g_tabCachedRT = nullptr;
+    }
+    if (g_tabCachedRT && FAILED(g_tabCachedRT->BindDC(hdc, pRect)))
+        return nullptr;
+    return g_tabCachedRT;
+}
+
+// Gets the cached RT for pill, creating if needed.
+// Much cheaper than CreateDCRenderTarget() per frame — only does BindDC().
+static ID2D1DCRenderTarget* PillGetCachedRT(HDC hdc, LPCRECT pRect)
+{
+    if (!g_pillCachedRT && g_d2dFactory)
+    {
+        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0,
+            D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+            D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &g_pillCachedRT)))
+            g_pillCachedRT = nullptr;
+    }
+    if (g_pillCachedRT)
+    {
+        if (FAILED(g_pillCachedRT->BindDC(hdc, pRect)))
+            return nullptr;
+    }
+    return g_pillCachedRT;
+}
+
+// Cached RT for selection background — same BindDC logic.
+static ID2D1DCRenderTarget* SelGetCachedRT(HDC hdc, LPCRECT pRect)
+{
+    if (!g_selCachedRT && g_d2dFactory)
+    {
+        D2D1_RENDER_TARGET_PROPERTIES rtProps = D2D1::RenderTargetProperties(
+            D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED),
+            0, 0,
+            D2D1_RENDER_TARGET_USAGE_GDI_COMPATIBLE,
+            D2D1_FEATURE_LEVEL_DEFAULT);
+        if (FAILED(g_d2dFactory->CreateDCRenderTarget(&rtProps, &g_selCachedRT)))
+            g_selCachedRT = nullptr;
+    }
+    if (g_selCachedRT)
+    {
+        if (FAILED(g_selCachedRT->BindDC(hdc, pRect)))
+            return nullptr;
+    }
+    return g_selCachedRT;
+}
+
+static FLOAT EaseOutExpo(DOUBLE t)
+{
+    if (t <= 0.0) return 0.0f;
+    if (t >= 1.0) return 1.0f;
+    return (FLOAT)(1.0 - pow(2.0, -10.0 * t));
+}
+
+// Ease-out cubic (for Smooth Slide style)
+static FLOAT EaseOutCubic(DOUBLE t)
+{
+    if (t <= 0.0) return 0.0f;
+    if (t >= 1.0) return 1.0f;
+    DOUBLE inv = 1.0 - t;
+    return (FLOAT)(1.0 - inv * inv * inv);
+}
+
+// Elastic tail: short hesitation → catches up → glides to rest
+static FLOAT EaseElasticTail(DOUBLE t)
+{
+    if (t <= 0.0) return 0.0f;
+    if (t >= 1.0) return 1.0f;
+    // Cubic-in start (brief stick) → quartic-out catch-up (derivative-matched at junction)
+    if (t < 0.2)
+    {
+        DOUBLE n = t / 0.2;
+        return (FLOAT)(0.25 * n * n * n);
+    }
+    DOUBLE n = (t - 0.2) / 0.8;
+    DOUBLE inv = 1.0 - n;
+    return (FLOAT)(0.25 + 0.75 * (1.0 - inv * inv * inv * inv));
+}
+
+// Thread-safe version with animation style support
+static void PillGetVirtualBoundsSnap(DOUBLE t, int prevTop, int curTop, float itemH,
+                                      int style, float* outTop, float* outBottom)
+{
+    float halfPad = itemH * (1.0f - PILL_H_FRAC) / 2.0f;
+
+    if (style == 2)  // Vertical expand: pill at destination grows from center
+    {
+        float centerY = (float)curTop + itemH / 2.0f;
+        float pillHalf = (itemH * PILL_H_FRAC / 2.0f) * EaseOutExpo(t);
+        *outTop    = centerY - pillHalf;
+        *outBottom = centerY + pillHalf;
+        return;
+    }
+
+    if (style == 3)  // Smooth slide: both edges move together
+    {
+        float e = EaseOutCubic(t);
+        *outTop    = (float)prevTop + halfPad + ((float)curTop + halfPad - ((float)prevTop + halfPad)) * e;
+        *outBottom = (float)prevTop + itemH - halfPad + ((float)curTop + itemH - halfPad - ((float)prevTop + itemH - halfPad)) * e;
+        return;
+    }
+
+    // style == 1: WinUI elastic (default)
+    float fromY1  = (float)prevTop + halfPad;
+    float fromY2  = (float)prevTop + itemH - halfPad;
+    float toY1    = (float)curTop  + halfPad;
+    float toY2    = (float)curTop  + itemH - halfPad;
+
+    float leadT  = EaseOutExpo(t);
+    float trailT = EaseElasticTail(t > PILL_TRAIL ? (t - PILL_TRAIL) / (1.0 - PILL_TRAIL) : 0.0);
+
+    if (curTop > prevTop)
+    {
+        *outBottom = fromY2 + (toY2 - fromY2) * leadT;
+        *outTop    = fromY1 + (toY1 - fromY1) * trailT;
+    }
+    else
+    {
+        *outTop    = fromY1 + (toY1 - fromY1) * leadT;
+        *outBottom = fromY2 + (toY2 - fromY2) * trailT;
+    }
+}
+
+// Determine pill animation context from root window class
+// Returns: 0 = no animation (regedit, device manager, etc.)
+//          1 = user style (Explorer nav pane)
+//          2 = user style (file picker dialogs)
+static int PillTreeContext()
+{
+    if (!g_pillTreeHWND || !IsWindow(g_pillTreeHWND)) return 0;
+    HWND root = GetAncestor(g_pillTreeHWND, GA_ROOT);
+    if (!root) return 0;
+    wchar_t cls[64] = {};
+    GetClassNameW(root, cls, 64);
+    if (_wcsicmp(cls, L"CabinetWClass") == 0 ||
+        _wcsicmp(cls, L"ExploreWClass") == 0)
+        return 1;
+    if (_wcsicmp(cls, L"#32770") == 0 ||
+        _wcsicmp(cls, L"NativeHWNDHost") == 0)
+        return 2;
+    return 0;
+}
+
+// Animation thread — independent timing, inline rendering via RedrawWindow
+// Nav pane TreeView has its own paint queue separate from content area,
+// so folder loading does not block its redraws.
+static HANDLE  g_pillThread     = nullptr;
+static DWORD   g_pillThreadId   = 0;
+static volatile bool g_pillThreadStop = false;
+
+static DWORD WINAPI PillAnimThread(LPVOID)
+{
+    // Request 1ms timer resolution (default 15.6ms makes Sleep(6) sleep ~15ms)
+    timeBeginPeriod(1);
+
+    while (!g_pillThreadStop)
+    {
+        if (!g_pillTimer)
+        {
+            Sleep(2);
+            continue;
+        }
+
+        if (!g_pillTreeHWND || !IsWindow(g_pillTreeHWND))
+        {
+            g_pillTreeHWND  = nullptr;
+            g_pillLastValid = false;
+            g_pillTimer = 0;
+            continue;
+        }
+
+        // Read snapshot values (thread-safe)
+        int snapPrev = g_pillSnapPrevTop;
+        int snapCur  = g_pillSnapCurTop;
+        int snapH    = g_pillSnapItemH;
+        int snapStyle = g_pillSnapStyle;
+
+        DOUBLE animT = (TimerGetSeconds() - g_pillAnimStart) / PILL_DUR;
+        bool finished = (animT >= 1.0);
+        if (animT > 1.0) animT = 1.0;
+
+        float vTop, vBottom;
+        if (!finished)
+            PillGetVirtualBoundsSnap(animT, snapPrev, snapCur, (float)snapH, snapStyle, &vTop, &vBottom);
+        else
+        {
+            float h       = (float)snapH;
+            float halfPad = h * (1.0f - PILL_H_FRAC) / 2.0f;
+            vTop    = (float)snapCur + halfPad;
+            vBottom = (float)snapCur + h - halfPad;
+        }
+
+        // Delta check — skip if pill barely moved (always paint final 15% for smooth landing)
+        if (g_pillLastValid && !finished && animT < 0.85)
+        {
+            float dTop = vTop - g_pillLastVTop;
+            float dBot = vBottom - g_pillLastVBot;
+            if (dTop * dTop + dBot * dBot < 0.01f)
+            {
+                Sleep(1);
+                continue;
+            }
+        }
+
+        // Single merged dirty rect covering old + new pill bounds
+        FLOAT dpiScale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
+        int pillRight = (int)ceilf((1.8f + 3.2f) * dpiScale) + 2;
+
+        int dirtyTop, dirtyBot;
+        if (g_pillLastValid)
+        {
+            float allTop = g_pillLastVTop < vTop ? g_pillLastVTop : vTop;
+            float allBot = g_pillLastVBot > vBottom ? g_pillLastVBot : vBottom;
+            dirtyTop = (int)floorf(allTop) - 1;
+            dirtyBot = (int)ceilf(allBot) + 1;
+        }
+        else
+        {
+            dirtyTop = (snapPrev < snapCur ? snapPrev : snapCur);
+            dirtyBot = (snapPrev > snapCur ? snapPrev : snapCur) + snapH;
+        }
+
+        RECT rc = { 0, dirtyTop, pillRight, dirtyBot };
+        RedrawWindow(g_pillTreeHWND, &rc, nullptr,
+                     RDW_INVALIDATE | RDW_UPDATENOW | RDW_NOERASE | RDW_NOINTERNALPAINT | RDW_NOCHILDREN);
+
+        g_pillLastVTop  = vTop;
+        g_pillLastVBot  = vBottom;
+        g_pillLastValid = !finished;
+
+        if (finished)
+        {
+            g_pillTimer = 0;
+            g_pillPrevTop = g_pillCurTop;
+        }
+
+        Sleep(4);
+    }
+    timeEndPeriod(1);
+    return 0;
+}
+
+
+// Finds SysTreeView32 — first tries known Explorer/dialog windows,
+// then falls back to any visible window on the thread
+static BOOL CALLBACK FindTreeViewChildProc(HWND hwnd, LPARAM lParam)
+{
+    wchar_t cls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    if (_wcsicmp(cls, L"SysTreeView32") == 0 && IsWindowVisible(hwnd))
+    { *(HWND*)lParam = hwnd; return FALSE; }
+    return TRUE;
+}
+
+static BOOL CALLBACK FindTreeViewEnumProc(HWND hwnd, LPARAM lParam)
+{
+    wchar_t cls[64] = {};
+    GetClassNameW(hwnd, cls, 64);
+    // Explorer, common file dialogs, and other Win32 dialogs
+    if (_wcsicmp(cls, L"CabinetWClass")  == 0 ||
+        _wcsicmp(cls, L"ExploreWClass")  == 0 ||
+        _wcsicmp(cls, L"#32770")         == 0 ||
+        _wcsicmp(cls, L"NativeHWNDHost") == 0)
+    {
+        EnumChildWindows(hwnd, FindTreeViewChildProc, lParam);
+        if (*(HWND*)lParam) return FALSE;
+    }
+    return TRUE;
+}
+
+static HWND PillFindTreeView()
+{
+    HWND found = nullptr;
+    EnumThreadWindows(GetCurrentThreadId(), FindTreeViewEnumProc, (LPARAM)&found);
+    return found;
 }
 
 using NtUserCreateWindowEx_t = HWND(WINAPI*)(DWORD, PUNICODE_STRING, LPCWSTR, PUNICODE_STRING, DWORD, LONG, LONG, LONG, LONG, HWND, HMENU, HINSTANCE, LPVOID, DWORD, DWORD, DWORD, VOID*);
@@ -3104,14 +3460,58 @@ BOOL PaintTab(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     if (iPartId == TABP_PANE || !g_d2dFactory)
         return FALSE;
 
-    INT index = (iStateId == TIS_NORMAL) ? 0 
-              : (iStateId == TIS_HOT) ? 1 : (iStateId == TIS_DISABLED) ? 2 : 3;
+    BOOL isSelected = (iStateId == TIS_SELECTED || iStateId == TIS_FOCUSED);
+    BOOL isHot      = (iStateId == TIS_HOT);
+
+    // All backgrounds via cached bitmap (no live D2D = no flicker)
+    INT index;
+    if (isSelected)      index = 1;
+    else if (isHot)      index = 3;
+    else if (iStateId == TIS_DISABLED) index = 2;
+    else                 index = 0;
 
     if (!g_themeCache.tab[index])
         if (!g_themeCache.CacheTab(hdc, iStateId, index))
             return FALSE;
+
     RECT newRc = {pRect->left-1, pRect->top-1, pRect->right+1, pRect->bottom+1};
     DrawNineGridStretch(hdc, g_themeCache.tab[index], &newRc, 9, 9, 8, 8);
+
+    // ── Static pill on selected tab ──────────────────────────────────
+    if (!isSelected)
+        return TRUE;
+
+    FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
+    FLOAT w     = (FLOAT)RECTWIDTH(pRect);
+    FLOAT h     = (FLOAT)RECTHEIGHT(pRect);
+    FLOAT inset = 3.0f;
+
+    FLOAT pillHeight = 2.8f * scale;
+    FLOAT pillBottom = h - inset - 0.5f;
+    FLOAT pillTop    = pillBottom - pillHeight;
+    FLOAT pillRadius = pillHeight / 2.0f;
+
+    FLOAT bgW   = w - inset * 2.0f;
+    FLOAT pillW = bgW * TAB_PILL_FRAC;
+    if (pillW < 14.0f * scale) pillW = 14.0f * scale;
+    if (pillW > bgW - 2.0f) pillW = bgW - 2.0f;
+    FLOAT pillLeft = inset + (bgW - pillW) / 2.0f;
+
+    ID2D1DCRenderTarget* pRT = TabGetCachedRT(hdc, pRect);
+    if (!pRT) return TRUE;
+
+    D2D1_COLOR_F accentColor = IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2);
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+    pRT->CreateSolidColorBrush(accentColor, &brush);
+
+    pRT->BeginDraw();
+    pRT->FillRoundedRectangle(
+        D2D1::RoundedRect(
+            D2D1::RectF(pillLeft, pillTop, pillLeft + pillW, pillBottom),
+            pillRadius, pillRadius),
+        brush.Get());
+    pRT->EndDraw();
+
     return TRUE;
 }
 
@@ -3129,46 +3529,40 @@ BOOL CThemeCache::CacheTab(HDC hdc, INT iStateId, INT stateIndex)
     if (FAILED(CreateBoundD2DRenderTarget(g_themeCache.tab[stateIndex], &rc, g_d2dFactory, &pRenderTarget)))
         return FALSE;
 
+    FLOAT inset = 3.0f;
     pRenderTarget->BeginDraw();
-    if (iStateId == TIS_NORMAL)
+
+    if (stateIndex == 0)  // TIS_NORMAL — transparent
     {
         D2D1_RECT_F rect{0, 0, (FLOAT)width, (FLOAT)height};
         Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-        pRenderTarget->CreateSolidColorBrush(MyD2D1Color(0, 0 , 0, 0), &brush);
+        pRenderTarget->CreateSolidColorBrush(MyD2D1Color(0, 0, 0, 0), &brush);
         pRenderTarget->FillRectangle(rect, brush.Get());
     }
-    else if (iStateId == TIS_HOT || iStateId == TIS_DISABLED)
+    else if (stateIndex == 1)  // TIS_SELECTED — subtle fill (no pill, pill drawn live)
     {
-        D2D1_COLOR_F fillColor = (iStateId == TIS_HOT) ? MyD2D1Color(128, 96, 96, 96) : MyD2D1Color(96, 96, 96);
+        FLOAT selInset = 3.8f;  // extra lateral padding so bg doesn't overlap neighbors
         Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-        pRenderTarget->CreateSolidColorBrush(fillColor, &brush);
+        pRenderTarget->CreateSolidColorBrush(MyD2D1Color(48, 144, 144, 144), &brush);
+        pRenderTarget->FillRoundedRectangle(
+            D2D1::RoundedRect(D2D1::RectF(selInset, inset, width - selInset, height - inset),
+                              cornerRadius, cornerRadius), brush.Get());
+    }
+    else if (stateIndex == 2)  // TIS_DISABLED — gray
+    {
+        Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+        pRenderTarget->CreateSolidColorBrush(MyD2D1Color(96, 96, 96), &brush);
         D2D1_ROUNDED_RECT tabRect = D2D1::RoundedRect(D2D1::RectF(0, 0, width, height), cornerRadius, cornerRadius);
         pRenderTarget->FillRoundedRectangle(tabRect, brush.Get());
     }
-    else if (iStateId == TIS_SELECTED || iStateId == TIS_FOCUSED)
+    else if (stateIndex == 3)  // TIS_HOT — semi-transparent
     {
-        const FLOAT desiredHeight = 2.0f;       
-        const FLOAT widthPadding  = 5.0f;
-        const FLOAT verticalOffset = 2.0f;      
-    
-        FLOAT pillLeft   = widthPadding;
-        FLOAT pillRight  = width - widthPadding;
-        FLOAT pillBottom = height - verticalOffset;
-        FLOAT pillTop    = pillBottom - desiredHeight;
-
-        FLOAT pillHeight = desiredHeight;
-        FLOAT radius     = pillHeight / 2.0f * scale;
-
-        D2D1_ROUNDED_RECT pillRect = D2D1::RoundedRect(
-            D2D1::RectF(pillLeft, pillTop, pillRight, pillBottom),
-            radius, radius
-        );
-
-        D2D1_COLOR_F pillColor = IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2);
         Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
-        pRenderTarget->CreateSolidColorBrush(pillColor, &brush);
-        pRenderTarget->FillRoundedRectangle(pillRect, brush.Get());
+        pRenderTarget->CreateSolidColorBrush(MyD2D1Color(128, 96, 96, 96), &brush);
+        D2D1_ROUNDED_RECT tabRect = D2D1::RoundedRect(D2D1::RectF(0, 0, width, height), cornerRadius, cornerRadius);
+        pRenderTarget->FillRoundedRectangle(tabRect, brush.Get());
     }
+
     auto hr = pRenderTarget->EndDraw();
     if (FAILED(hr)) {Wh_Log(L"Failed D2D drawing [ERROR]: 0x%08X\n", hr); return FALSE;}
     return TRUE;
@@ -3781,21 +4175,212 @@ BOOL PaintTreeViewButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
 {
     if (!g_d2dFactory || (iPartId != THEMECLS_COMMONPROPS_PART && iPartId != TVP_TREEITEM))
         return FALSE;
-    
-    INT index = (iPartId == THEMECLS_COMMONPROPS_PART) ? 0 : (iStateId == TREIS_HOT) ? 1 : (iStateId == TREIS_SELECTED) ? 2 :
-                (iStateId == TREIS_SELECTEDNOTFOCUS) ? 3 : 4;
 
-    if (!g_themeCache.treeview[index])
-        if (!g_themeCache.CacheTreeViewButton(hdc, iPartId, iStateId, index))
-            return FALSE;
-    DrawNineGridStretch(hdc, g_themeCache.treeview[index], pRect, 9, 9, 8, 8);
+    BOOL isSelected = (iStateId == TREIS_SELECTED ||
+                       iStateId == TREIS_SELECTEDNOTFOCUS ||
+                       iStateId == TREIS_HOTSELECTED);
+
+    INT   animStyle   = PillAnimStyle();
+    FLOAT scale       = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
+    int   itemH       = RECTHEIGHT(pRect);
+    if (itemH > 0) g_pillItemH = itemH;
+
+    // Helper lambda: draws the slice of the virtual pill that overlaps pRect.
+    // If pExistingRT != nullptr and betweenBeginEnd == true, uses the already-open RT
+    // (merged with selection background draw → eliminates one RT per frame).
+    // Otherwise, uses the cached RT (g_pillCachedRT via BindDC —
+    // much cheaper than CreateDCRenderTarget per frame).
+    auto DrawPillSlice = [&](ID2D1DCRenderTarget* pExistingRT = nullptr,
+                             bool betweenBeginEnd = false)
+    {
+        bool isAnimating = (animStyle && g_pillTimer);
+        int effStyle = isAnimating ? (int)g_pillSnapStyle : 0;
+        float vTop, vBottom;
+        DOUBLE animT = 0.0;
+        if (isAnimating)
+        {
+            animT = (TimerGetSeconds() - g_pillAnimStart) / PILL_DUR;
+            if (animT > 1.0) animT = 1.0;
+            PillGetVirtualBoundsSnap(animT, g_pillPrevTop, g_pillCurTop,
+                                      (float)g_pillItemH, effStyle, &vTop, &vBottom);
+        }
+        else
+        {
+            float h       = (float)g_pillItemH;
+            float halfPad = h * (1.0f - PILL_H_FRAC) / 2.0f;
+            vTop    = (float)g_pillCurTop + halfPad;
+            vBottom = (float)g_pillCurTop + h - halfPad;
+        }
+
+        float iTop    = (float)pRect->top;
+        float iBottom = (float)pRect->bottom;
+        float clipTop    = vTop    < iTop    ? iTop    : vTop;
+        float clipBottom = vBottom > iBottom ? iBottom : vBottom;
+        if (clipBottom - clipTop < 0.5f) return;
+
+        float localTop    = clipTop    - iTop;
+        float localBottom = clipBottom - iTop;
+
+        ID2D1DCRenderTarget* pRT = pExistingRT;
+        if (!pRT)
+        {
+            pRT = PillGetCachedRT(hdc, pRect);
+            if (!pRT) return;
+        }
+
+        float pillW = 3.2f * scale;
+        float pillX = 1.8f;
+
+        // Trailing thinning: pill narrows during movement (WinUI elastic only)
+        if (isAnimating && effStyle == 1)
+        {
+            float inv = 1.0f - (float)animT;
+            float thinFactor = 0.60f + 0.40f * (1.0f - inv * inv * inv);
+            float centerX = pillX + pillW / 2.0f;
+            pillW *= thinFactor;
+            pillX = centerX - pillW / 2.0f;
+        }
+
+        D2D1_COLOR_F accentColor = IsAccentColorPossibleD2D(102, 206, 255, SystemAccentColorLight2);
+
+        // Reuse cached brush — only recreate if accent color changed or RT changed
+        static ID2D1SolidColorBrush* s_pillSliceBrush = nullptr;
+        static ID2D1DCRenderTarget*  s_pillSliceBrushRT = nullptr;
+        static D2D1_COLOR_F          s_pillSliceBrushClr = {};
+        bool clrChanged = (s_pillSliceBrushClr.r != accentColor.r ||
+                           s_pillSliceBrushClr.g != accentColor.g ||
+                           s_pillSliceBrushClr.b != accentColor.b);
+        if (!s_pillSliceBrush || s_pillSliceBrushRT != pRT || clrChanged)
+        {
+            if (s_pillSliceBrush) { s_pillSliceBrush->Release(); s_pillSliceBrush = nullptr; }
+            pRT->CreateSolidColorBrush(accentColor, &s_pillSliceBrush);
+            s_pillSliceBrushRT = pRT;
+            s_pillSliceBrushClr = accentColor;
+        }
+        if (!s_pillSliceBrush) return;
+
+        if (!betweenBeginEnd) pRT->BeginDraw();
+        pRT->FillRoundedRectangle(
+            D2D1::RoundedRect(
+                D2D1::RectF(pillX, localTop, pillX + pillW, localBottom),
+                pillW / 2.0f, pillW / 2.0f),
+            s_pillSliceBrush);
+        if (!betweenBeginEnd) pRT->EndDraw();
+    };
+
+    // ── Unselected item ──────────────────────────────────────────────
+    if (!isSelected)
+    {
+        INT index = (iPartId == THEMECLS_COMMONPROPS_PART) ? 0 : 1;
+        if (!g_themeCache.treeview[index])
+            if (!g_themeCache.CacheTreeViewButton(hdc, iPartId, iStateId, index))
+                return FALSE;
+
+        if (iPartId == TVP_TREEITEM && iStateId == TREIS_HOT)
+        {
+            FLOAT padX = 1.0f * scale;
+            RECT paddedRect = { pRect->left + (LONG)padX, pRect->top,
+                                pRect->right - (LONG)padX, pRect->bottom };
+            DrawNineGridStretch(hdc, g_themeCache.treeview[index], &paddedRect, 9, 9, 8, 8);
+        }
+        else
+            DrawNineGridStretch(hdc, g_themeCache.treeview[index], pRect, 9, 9, 8, 8);
+
+        // Pill in transit can overlap unselected items during stretch
+        if (g_pillTimer) DrawPillSlice();
+
+        return TRUE;
+    }
+
+    // ── Selected item ──────────────────────────────────────────────────
+
+    {
+        // Fast path: WindowFromDC gives us the TreeView directly (no enum)
+        HWND currentTree = WindowFromDC(hdc);
+        if (!currentTree || !IsWindow(currentTree))
+            currentTree = PillFindTreeView();  // fallback for memory DCs
+        if (currentTree != g_pillTreeHWND)
+        {
+            g_pillTreeHWND = currentTree;
+            g_pillCurTop   = -99999;
+            g_pillCurItem  = 0;
+        }
+    }
+
+    if (pRect->top != g_pillCurTop)
+    {
+        constexpr UINT   TVM_GETNEXTITEM_  = 0x110A;
+        constexpr WPARAM TVGN_DROPHILITE_  = 0x0008;
+        constexpr WPARAM TVGN_CARET_       = 0x0009;
+        bool isDragging = g_pillTreeHWND &&
+            SendMessageW(g_pillTreeHWND, TVM_GETNEXTITEM_, TVGN_DROPHILITE_, 0) != 0;
+
+        if (!isDragging)
+        {
+            bool isFirstEver = (g_pillCurTop == -99999);
+
+            LPARAM curItem = g_pillTreeHWND
+                ? (LPARAM)SendMessageW(g_pillTreeHWND, TVM_GETNEXTITEM_, TVGN_CARET_, 0)
+                : 0;
+            bool isSameItem = (!isFirstEver && curItem != 0 && curItem == g_pillCurItem);
+
+            // Stop any running animation
+            if (g_pillTimer) g_pillTimer = 0;
+            g_pillLastValid = false;
+
+            g_pillPrevTop   = (isFirstEver || isSameItem) ? pRect->top : g_pillCurTop;
+            g_pillCurTop    = pRect->top;
+            g_pillCurItem   = curItem;
+            g_pillAnimStart = TimerGetSeconds();
+
+            // Animate for genuine item-to-item navigation
+            if (animStyle && !isFirstEver && !isSameItem)
+            {
+                int ctx = PillTreeContext();
+                if (ctx > 0)
+                {
+                    g_pillSnapPrevTop = g_pillPrevTop;
+                    g_pillSnapCurTop  = g_pillCurTop;
+                    g_pillSnapItemH   = g_pillItemH;
+                    g_pillSnapStyle   = animStyle;
+                    g_pillTimer = 1;
+                }
+            }
+        }
+    }
+
+    // Selection background + Pill in a single D2D session (cached RT)
+    ID2D1DCRenderTarget* pRenderTarget = SelGetCachedRT(hdc, pRect);
+    if (!pRenderTarget)
+        return FALSE;
+
+    FLOAT width  = (FLOAT)RECTWIDTH(pRect);
+    FLOAT height = (FLOAT)RECTHEIGHT(pRect);
+    FLOAT cr     = 5.f * scale;
+    FLOAT padX   = 1.0f * scale;
+
+    D2D1_COLOR_F fillColor = (iStateId == TREIS_SELECTEDNOTFOCUS) ?
+        MyD2D1Color(32, 144, 144, 144) : MyD2D1Color(64, 144, 144, 144);
+
+    Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> brush;
+    pRenderTarget->CreateSolidColorBrush(fillColor, &brush);
+    pRenderTarget->BeginDraw();
+    pRenderTarget->FillRoundedRectangle(
+        D2D1::RoundedRect(D2D1::RectF(padX, 0, width - padX, height), cr, cr),
+        brush.Get());
+
+    // Pill desenhado no mesmo BeginDraw/EndDraw — zero RT extra
+    DrawPillSlice(pRenderTarget, true);
+
+    pRenderTarget->EndDraw();
+
     return TRUE;
 }
 
 BOOL CThemeCache::CacheTreeViewButton(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
-    FLOAT cornerRadius = 4.f * scale;
+    FLOAT cornerRadius = 5.f * scale;
     INT x = 0, y = 0;
     INT width = 18, height = 18;
 
@@ -5684,6 +6269,12 @@ LRESULT CALLBACK CallWndProc(INT nCode, WPARAM wParam, LPARAM lParam)
             RemoveOrUnloadFlyoutSubclass(cwp->hwnd);
             break;
         }
+        case WM_SETTINGCHANGE:
+        {
+            // Re-read animation preference if accessibility settings changed
+            PillInvalidateAnimCache();
+            break;
+        }
         default:
         {
             if (cwp->message == g_msgRainbowTimer)
@@ -6253,6 +6844,13 @@ VOID LoadSettings()
        g_settings.AccentColorize = GetAccentColor(g_settings.AccentColor);
 
     g_settings.FillBg = Wh_GetIntSetting(L"RenderingMod.ThemeBackground");
+
+    auto strPillAnim = WindhawkUtils::StringSetting(Wh_GetStringSetting(L"RenderingMod.PillAnimations"));
+    if (0 == wcscmp(strPillAnim, L"none"))         g_settings.PillAnimStyle = 0;
+    else if (0 == wcscmp(strPillAnim, L"winui"))   g_settings.PillAnimStyle = 1;
+    else if (0 == wcscmp(strPillAnim, L"expand"))  g_settings.PillAnimStyle = 2;
+    else if (0 == wcscmp(strPillAnim, L"slide"))   g_settings.PillAnimStyle = 3;
+    else                                            g_settings.PillAnimStyle = 1;
     
     g_settings.SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
     
@@ -6329,6 +6927,11 @@ BOOL Wh_ModInit(VOID)
 {
     TimerInitialize();
 
+    // Start dedicated animation thread (independent of Explorer's message pump)
+    g_pillThreadStop = false;
+    g_pillThread = CreateThread(nullptr, 0, PillAnimThread, nullptr, 0, &g_pillThreadId);
+    if (g_pillThread) SetThreadPriority(g_pillThread, THREAD_PRIORITY_ABOVE_NORMAL);
+
     LoadSettings();
 
     HMODULE hModule = GetModuleHandle(L"win32u.dll");
@@ -6362,6 +6965,13 @@ VOID Wh_ModAfterInit()
 VOID Wh_ModUninit(VOID) 
 { 
     g_settings.Unload = TRUE;
+    g_pillTimer = 0;
+    g_pillThreadStop = true;
+    if (g_pillThread) { WaitForSingleObject(g_pillThread, 500); CloseHandle(g_pillThread); g_pillThread = nullptr; }
+    if (g_pillCachedRT) { g_pillCachedRT->Release(); g_pillCachedRT = nullptr; }
+    if (g_selCachedRT)  { g_selCachedRT->Release();  g_selCachedRT  = nullptr; }
+    if (g_tabCachedRT)  { g_tabCachedRT->Release();  g_tabCachedRT  = nullptr; }
+
     if (g_settings.FillBg)
         g_d2dFactory->Release();
     
@@ -6392,6 +7002,9 @@ VOID Wh_ModUninit(VOID)
         RainbowWindows.clear();
     }
     
+    g_pillTimer = 0;
+    g_pillLastValid = false;
+
     RemoveOrUnloadWindowsHooks(TRUE);
     RemoveOrUnloadFlyoutSubclass(nullptr, TRUE);    
     ApplyForExistingWindows();
