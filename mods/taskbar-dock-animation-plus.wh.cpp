@@ -6,14 +6,14 @@
 // @name:ko-KR        작업 표시줄 Dock 애니메이션 Plus
 // @name:pt-BR        Animação Dock da Barra de Tarefas Plus
 // @name:it-IT        Animazione Dock della Barra delle applicazioni Plus
-// @description       Animates taskbar icons on mouse hover like in macOS
-// @description:uk-UA Анімація іконок панелі завдань, як в macOS, при наведенні
-// @description:zh-CN 类似 macOS 的任务栏图标悬停动画
-// @description:ja-JP macOS のように、マウスホバーでタスクバーアイコンをアニメーション表示します
-// @description:ko-KR macOS처럼 마우스를 올리면 작업 표시줄 아이콘이 애니메이션됩니다
-// @description:pt-BR Anima os ícones da barra de tarefas ao passar o mouse, como no macOS
-// @description:it-IT Anima le icone della barra delle applicazioni al passaggio del mouse, come su macOS
-// @version           2.0.0
+// @description       Animates taskbar icons on mouse hover like in macOS (updated fork with support for all taskbar positions and multi-monitor fixes)
+// @description:uk-UA Анімація іконок панелі завдань, як в macOS, при наведенні (версія з підтримкою всіх положень панелі та виправленнями для кількох моніторів)
+// @description:zh-CN 类似 macOS 的任务栏图标悬停动画（支持所有任务栏位置和多显示器修复的更新版）
+// @description:ja-JP macOS のようにマウスホバーでタスクバーアイコンをアニメーション表示します（すべてのタスクバー位置への対応とマルチモニター修正を加えた更新版）
+// @description:ko-KR macOS처럼 마우스를 올리면 작업 표시줄 아이콘이 애니메이션됩니다 (모든 작업 표시줄 위치 지원 및 멀티 모니터 버그가 수정된 업데이트 버전)
+// @description:pt-BR Anima os ícones da barra de tarefas ao passar o mouse, como no macOS (versão atualizada com suporte para todas as posições da barra e correções para múltiplos monitores)
+// @description:it-IT Anima le icone della barra delle applicazioni al passaggio del mouse, come su macOS (versione aggiornata con supporto per tutte le posizioni della barra e correzioni multi-monitor)
+// @version           2.0.1
 // @author            incconutwo
 // @github            https://github.com/incconutwo
 // @include           explorer.exe
@@ -25,17 +25,19 @@
 /*
 # Taskbar Dock Animation Plus
 
-This mod adds a macOS-like taskbar animation.
-It is an updated fork of the original "Taskbar Dock Animation" mod, extending compatibility to all taskbar positions.
+This mod animates taskbar icons on mouse hover like in macOS.
+
+This is an updated fork of the original Taskbar Dock Animation mod, adding compatibility for all taskbar positions and key stability improvements.
 
 **Requires Windows 11 or newer to function.**
 
 ---
 
 ### 🌟 Key Additions in this Fork
-* **Universal Layout Support**: Native compatibility for Left, Right, and Top taskbar configurations.
-* **Adaptive Animations**: Dynamically aligns scaling directions, spacing shifts, and bounce offsets to the current taskbar orientation.
-* **On-the-Fly Refreshing**: Updates properties in real time when moving the taskbar, requiring no system restarts.
+* **Support for all Taskbar Placements**: Works seamlessly on Bottom, Top, Left, and Right taskbar positions.
+* **Multi-Monitor Stability**: Fixes crashes and compatibility issues when using multiple screens or monitors.
+* **Smoother Animations**: The idle "breathing" / bounce animation now fades in and out smoothly instead of snapping abruptly.
+* **Instant Settings & Position Updates**: Updates settings and positions in real time as you configure them or move the taskbar, with no restarts required.
 
 ---
 
