@@ -5263,7 +5263,7 @@ void __fastcall Hooked_BorderRect(HDC hdc, COLORREF color, LPRECT pRect, INT cxT
 
 VOID UxThemeHooks(BOOL isFlyoutEffectEnabled)
 {
-    WindhawkUtils::SYMBOL_HOOK uxthemedll_hooks[] =
+    WindhawkUtils::SYMBOL_HOOK uxtheme_dll_hooks[] =
     {        
         {
             {
@@ -5312,7 +5312,7 @@ VOID UxThemeHooks(BOOL isFlyoutEffectEnabled)
     }
 
     // If flyout effects setting isn't enabled hook to all symbols except the last one -> CThemeMenu::MenuKeyboardMsgProc
-    if (!WindhawkUtils::HookSymbols(hUxTheme, uxthemedll_hooks, !isFlyoutEffectEnabled ? ARRAYSIZE(uxthemedll_hooks) - 1 : ARRAYSIZE(uxthemedll_hooks))) {
+    if (!WindhawkUtils::HookSymbols(hUxTheme, uxtheme_dll_hooks, !isFlyoutEffectEnabled ? ARRAYSIZE(uxtheme_dll_hooks) - 1 : ARRAYSIZE(uxtheme_dll_hooks))) {
         Wh_Log(L"Failed to hook one or more symbol functions in uxtheme.dll");
         return;
     }
@@ -5659,7 +5659,7 @@ void __fastcall HookedRenderTooltip(HWND hWnd, HDC hdc, HGDIOBJ *a3)
 VOID User32Hooks(BOOL areSysColorsApplied)
 {
     //WindhawkUtils::SetFunctionHook(SetClassLongPtrW, HookedSetClassLongPtrW, &SetClassLongPtrW_orig);
-    WindhawkUtils::SYMBOL_HOOK user32dll_hooks[] =
+    WindhawkUtils::SYMBOL_HOOK user32_dll_hooks[] =
     {  
         {
             {
@@ -5720,7 +5720,7 @@ VOID User32Hooks(BOOL areSysColorsApplied)
     }
 
     // If SetSysColors API is executed then hook only the first two symbols of the array -> RealDefWindowProcWorker, RenderTooltip routines
-    if (!WindhawkUtils::HookSymbols(hUser32, user32dll_hooks, areSysColorsApplied ? 2 : ARRAYSIZE(user32dll_hooks))) {
+    if (!WindhawkUtils::HookSymbols(hUser32, user32_dll_hooks, areSysColorsApplied ? 2 : ARRAYSIZE(user32_dll_hooks))) {
         Wh_Log(L"Failed to hook one or more symbol functions in user32.dll");
         return;
     }
@@ -5814,7 +5814,7 @@ void STDCALL HookedComboEx_OnDrawItem(struct COMBOEX *a1, struct tagDRAWITEMSTRU
 
 VOID Comctl32Hooks()
 {
-    WindhawkUtils::SYMBOL_HOOK comctl32_hooks[] =
+    WindhawkUtils::SYMBOL_HOOK comctl32_dll_hooks[] =
     {        
         {
             {
@@ -5884,7 +5884,7 @@ VOID Comctl32Hooks()
         return;
     }
 
-    if (!WindhawkUtils::HookSymbols(hComCtl32, comctl32_hooks, ARRAYSIZE(comctl32_hooks))) {
+    if (!WindhawkUtils::HookSymbols(hComCtl32, comctl32_dll_hooks, ARRAYSIZE(comctl32_dll_hooks))) {
         Wh_Log(L"Failed to hook one or more symbol functions in comctl32.dll");
         return;
     }
@@ -5972,7 +5972,7 @@ void __thiscall Hooked_CNscTree_DrawDivider(CNscTree *__this, HDC hdc, struct _T
 
 VOID ExplorerFrameHooks()
 {
-    WindhawkUtils::SYMBOL_HOOK ExplorerFrame_hooks[] =
+    WindhawkUtils::SYMBOL_HOOK explorerframe_dll_hooks[] =
     {
         {
             {
@@ -5994,7 +5994,7 @@ VOID ExplorerFrameHooks()
         return;
     }
 
-    if (!WindhawkUtils::HookSymbols(hExplorerFrame, ExplorerFrame_hooks, ARRAYSIZE(ExplorerFrame_hooks))) {
+    if (!WindhawkUtils::HookSymbols(hExplorerFrame, explorerframe_dll_hooks, ARRAYSIZE(explorerframe_dll_hooks))) {
         Wh_Log(L"Failed to hook one or more symbol functions in ExplorerFrame.dll");
         return;
     }
@@ -6066,7 +6066,7 @@ HANDLE __fastcall HookedBrandingLoadImage(LPCWSTR pszBrand, UINT uID, UINT type,
 
 VOID WinbrandHooks()
 {
-    WindhawkUtils::SYMBOL_HOOK Winbrand_hooks[] =
+    WindhawkUtils::SYMBOL_HOOK winbrand_dll_hooks[] =
     {
         {
             {
@@ -6088,7 +6088,7 @@ VOID WinbrandHooks()
         return;
     }
 
-    if (!WindhawkUtils::HookSymbols(hWinbrand , Winbrand_hooks, ARRAYSIZE(Winbrand_hooks))) {
+    if (!WindhawkUtils::HookSymbols(hWinbrand , winbrand_dll_hooks, ARRAYSIZE(winbrand_dll_hooks))) {
         Wh_Log(L"Failed to hook one or more symbol functions in winbrand.dll");
         return;
     }
@@ -6154,7 +6154,7 @@ BOOL STDCALL HookedCComboBoxExBase_OnWinEvent(class CComboBoxExBase *__this, HWN
 
 VOID Comdlg32Hooks()
 {
-    WindhawkUtils::SYMBOL_HOOK hComDlg32_hooks[] =
+    WindhawkUtils::SYMBOL_HOOK comdlg32_dll_hooks[] =
     {
         
         {
@@ -6204,7 +6204,7 @@ VOID Comdlg32Hooks()
         return;
     }
 
-    if (!WindhawkUtils::HookSymbols(hComDlg32 , hComDlg32_hooks, ARRAYSIZE(hComDlg32_hooks))) {
+    if (!WindhawkUtils::HookSymbols(hComDlg32 , comdlg32_dll_hooks, ARRAYSIZE(comdlg32_dll_hooks))) {
         Wh_Log(L"Failed to hook one or more symbol functions in comdlg32.dll");
         return;
     }
