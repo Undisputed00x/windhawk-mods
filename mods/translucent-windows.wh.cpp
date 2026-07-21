@@ -215,9 +215,6 @@ typedef BOOL(WINAPI* pShouldSystemUseDarkMode)();
 static auto ShouldSystemUseDarkMode = (pShouldSystemUseDarkMode)GetProcAddress(GetModuleHandle(L"uxtheme.dll"), MAKEINTRESOURCEA(138));
 BOOL g_IsSysThemeDarkMode = ShouldSystemUseDarkMode();
 
-// Global theme handle used for SysColors OpenThemeData usage
-HTHEME g_hThemeSysMetrics = nullptr;
-
 // Treeview window handle used in our CNscTree_DrawDivider() hook to draw our alpha blended navigation pane divider
 thread_local HWND tl_hwndTreeView = nullptr;
 
@@ -5939,20 +5936,19 @@ void __thiscall Hooked_CNscTree_DrawDivider(CNscTree *__this, HDC hdc, struct _T
         hwndTreeView = GetTreeViewHWND();
     
     if (!IsWindow(hwndTreeView) || !IsWindowClass(hwndTreeView, L"SysTreeView32"))
-        Fallback(L"Not valid TreeView window");
+        return Fallback(L"Not valid TreeView window");
     
     RECT treeItemRect = {0};
     *reinterpret_cast<HTREEITEM*>(&treeItemRect) = (HTREEITEM)hTreeItem;
     
     if (!SendMessageW(hwndTreeView, TVM_GETITEMRECT, 0, (LPARAM)&treeItemRect))
-        Fallback();
+        return Fallback();
     
     if (!g_d2dFactory)
-        Fallback();
+        return Fallback();
 
-    if (!g_themeCache.navigationdivider[0])
-        if (!g_themeCache.CacheNavigationDivider(hdc))
-            Fallback();
+    if (!g_themeCache.navigationdivider[0] && !g_themeCache.CacheNavigationDivider(hdc))
+        return Fallback();
     
     RECT lineRc = treeItemRect;
     INT middlePoint = RECTHEIGHT(&treeItemRect) / 4.f;
