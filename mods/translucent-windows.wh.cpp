@@ -215,9 +215,6 @@ typedef BOOL(WINAPI* pShouldSystemUseDarkMode)();
 static auto ShouldSystemUseDarkMode = (pShouldSystemUseDarkMode)GetProcAddress(GetModuleHandle(L"uxtheme.dll"), MAKEINTRESOURCEA(138));
 BOOL g_IsSysThemeDarkMode = ShouldSystemUseDarkMode();
 
-// Global theme handle used for SysColors OpenThemeData usage
-HTHEME g_hThemeSysMetrics = nullptr;
-
 // Treeview window handle used in our CNscTree_DrawDivider() hook to draw our alpha blended navigation pane divider
 thread_local HWND tl_hwndTreeView = nullptr;
 
@@ -1147,34 +1144,29 @@ constexpr INT SysColorElements[] = {
     COLOR_HOTLIGHT
 };
 
-BOOL SetCurrentTheme(LPCWSTR themeclass)
-{
-    if (g_hThemeSysMetrics != nullptr)
-        g_hThemeSysMetrics = nullptr;
-
-    g_hThemeSysMetrics = OpenThemeData(NULL, themeclass);
-    if (!g_hThemeSysMetrics)
-        CloseThemeData(g_hThemeSysMetrics);
-    return (g_hThemeSysMetrics) ? TRUE : FALSE;
-}
-
 void ClearSysColorsRegKey() {
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Control Panel\\Colors");
 }
 
+HTHEME SetThemeHandle(HWND hWnd, HTHEME& hTheme, LPCWSTR themeclass)
+{
+    return hTheme = OpenThemeData(hWnd, themeclass);
+}
+
 VOID RevertSysColors()
 {
-    if (!SetCurrentTheme(L"sysmetrics"))
+    HTHEME hThemeSysMetrics = nullptr;
+    if (!SetThemeHandle(nullptr, hThemeSysMetrics, L"sysmetrics"))
         return;
     
     COLORREF aNewColors[ARRAYSIZE(SysColorElements)];
 
     for (UINT i = 0; i < ARRAYSIZE(SysColorElements); i++) 
-        aNewColors[i] = GetThemeSysColor(g_hThemeSysMetrics, i); 
+        aNewColors[i] = GetThemeSysColor(hThemeSysMetrics, i); 
     SetSysColors(ARRAYSIZE(SysColorElements), SysColorElements, aNewColors); 
 
-    CloseThemeData(g_hThemeSysMetrics);
-    g_hThemeSysMetrics = nullptr;
+    CloseThemeData(hThemeSysMetrics);
+    hThemeSysMetrics = nullptr;
 
     //ClearSysColorsRegKey();
 }
@@ -1830,6 +1822,9 @@ CThemeCache g_themeCache;
 
 VOID DrawNineGridStretch(HDC hdc, HDC& srcDC, LPCRECT dstRect, INT left = 0, INT top = 0, INT right = 0, INT bottom = 0)
 {
+    if (!hdc || !srcDC)
+        return;
+    
     HBITMAP hBmp = (HBITMAP)GetCurrentObject(srcDC, OBJ_BITMAP);
     BITMAP bmp = {};
     GetObject(hBmp, sizeof(bmp), &bmp);
@@ -2542,11 +2537,11 @@ BOOL CThemeCache::CacheCommandlinkGlyph(INT iStateId, INT stateIndex)
 
 BOOL SanitizeAddressCombobox(HTHEME hTheme, HDC hdc, INT iPartId, INT iStateId)
 {
-    HTHEME MyhTheme = nullptr;
-    if ((MyhTheme = OpenThemeData(WindowFromDC(hdc), L"AddressComposited::ComboBox")) 
+    HTHEME hThemeAddressCB = nullptr;
+    if (SetThemeHandle(WindowFromDC(hdc), hThemeAddressCB, L"AddressComposited::ComboBox")
     && (iPartId == CP_BORDER || iPartId == CP_TRANSPARENTBACKGROUND))
     {
-        CloseThemeData(MyhTheme);
+        CloseThemeData(hThemeAddressCB);
         return TRUE;
     }
     return FALSE;
@@ -2632,13 +2627,12 @@ BOOL CThemeCache::CacheCombobox(INT iPartId, INT iStateId, INT stateIndex)
 
 BOOL IsAddressInnerBackground(HTHEME hTheme, HDC hdc, INT iPartId)
 {
-    HTHEME theme = NULL;
-    if ((theme = OpenThemeData(WindowFromDC(hdc), L"AddressComposited::Edit")) && iPartId == EP_BACKGROUNDWITHBORDER)
+    HTHEME hThemeAddress = NULL;
+    if (SetThemeHandle(WindowFromDC(hdc), hThemeAddress, L"AddressComposited::Edit") && iPartId == EP_BACKGROUNDWITHBORDER)
     {
-        CloseThemeData(theme);
+        CloseThemeData(hThemeAddress);
         return TRUE;
     }
-    CloseThemeData(theme);
     return FALSE;
 }
 
@@ -4666,15 +4660,17 @@ HRESULT WINAPI HookedDrawThemeBackground(
             return S_OK;
         else if (iPartId == BP_GROUPBOX)
         {
-            HTHEME hGroupBoxTheme;
-            if (hTheme == (hGroupBoxTheme = OpenThemeData(WindowFromDC(hdc), L"Button")))
+            HTHEME hThemeGroupBox = nullptr;
+            if (hTheme == SetThemeHandle(WindowFromDC(hdc), hThemeGroupBox, L"Button"))
             {
                 if (PaintGroupBox(hdc, iPartId, iStateId, pRect, pClipRect)) {
-                    CloseThemeData(hGroupBoxTheme);
+                    CloseThemeData(hThemeGroupBox);
                     return S_OK;
                 }
             }
-            CloseThemeData(hGroupBoxTheme);
+            
+            if (hThemeGroupBox)
+                CloseThemeData(hThemeGroupBox);
         }
     }
     else if (ThemeClassName == L"Tab")
@@ -4722,22 +4718,23 @@ HRESULT WINAPI HookedDrawThemeBackground(
         // The exported GetThemeClass function does not provide
         // full string of theme class names of derived theme classes
         // Use the OpenThemeData API instead.
-        HTHEME theme = NULL;
-        if (hTheme == (theme = OpenThemeData(WindowFromDC(hdc), L"Indeterminate::Progress")))
+        HTHEME hThemeProgress = NULL;
+        if (hTheme == SetThemeHandle(WindowFromDC(hdc), hThemeProgress, L"Indeterminate::Progress"))
         {
             if (PaintIndeterminateProgressBar(hdc, iPartId, iStateId, pRect))
             {
-                CloseThemeData(theme);
+                CloseThemeData(hThemeProgress);
                 return S_OK;
             }
-            CloseThemeData(theme);
+            CloseThemeData(hThemeProgress);
         }
         else if (PaintProgressBar(hdc, iPartId, iStateId, pRect)) 
         {
-            CloseThemeData(theme);
+            CloseThemeData(hThemeProgress);
             return S_OK;
         }
-        CloseThemeData(theme);
+        if (hThemeProgress)
+            CloseThemeData(hThemeProgress);
     } 
     else if (ThemeClassName == L"ListView")
     {
@@ -4763,14 +4760,13 @@ HRESULT WINAPI HookedDrawThemeBackground(
     }
     else if (ThemeClassName == L"Toolbar")
     {
-        HTHEME theme = NULL;
-        if ((theme = OpenThemeData(WindowFromDC(hdc), L"BB::Toolbar")))
+        HTHEME hThemeToolbar = NULL;
+        if (SetThemeHandle(WindowFromDC(hdc), hThemeToolbar, L"BB::Toolbar"))
         {
             if (PaintToolbarSplitDropDown(hdc, iPartId, iStateId, pRect)) {
-                CloseThemeData(theme);
+                CloseThemeData(hThemeToolbar);
                 return S_OK;
             }
-            CloseThemeData(theme);
         }
         if (PaintToolbarButton(hdc, iPartId, iStateId, pRect))
             return S_OK;
@@ -4786,14 +4782,12 @@ HRESULT WINAPI HookedDrawThemeBackground(
             return S_OK;
         // Force menu white glyphs
         else if (iPartId <= MENU_SYSTEMRESTORE && iPartId >= MENU_SYSTEMCLOSE && g_IsSysThemeDarkMode) {
-            HTHEME theme = NULL;
-            HRESULT hr = S_OK;
-            if ((theme = OpenThemeData(WindowFromDC(hdc), L"DarkMode::Menu"))) {
-                hr = DrawThemeBackground_orig(theme, hdc, iPartId, iStateId, pRect, pClipRect);
-                CloseThemeData(theme);
+            HTHEME hThemeMenu = NULL;
+            if (SetThemeHandle(WindowFromDC(hdc), hThemeMenu, L"DarkMode::Menu")) {
+                auto hr = DrawThemeBackground_orig(hThemeMenu, hdc, iPartId, iStateId, pRect, pClipRect);
+                CloseThemeData(hThemeMenu);
                 return hr;
             }
-            CloseThemeData(theme);
         }
     }
     else if (ThemeClassName == L"DragDrop")
@@ -4843,13 +4837,12 @@ HRESULT WINAPI HookedDrawThemeBackground(
         return S_OK;
     }
     else if (ThemeClassName == L"Toolbar" && iPartId == THEMECLS_COMMONPROPS_PART) {
-        HTHEME Toolbar;
-        if ((Toolbar = OpenThemeData(WindowFromDC(hdc), L"Placesbar::Toolbar"))) {
+        HTHEME hThemeToolbar = nullptr;
+        if ((SetThemeHandle(WindowFromDC(hdc), hThemeToolbar, L"Placesbar::Toolbar"))) {
             FillRect(hdc, pRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
-            CloseThemeData(Toolbar);
+            CloseThemeData(hThemeToolbar);
             return S_OK;
         }
-        CloseThemeData(Toolbar);
     }
     return hr;
 }
@@ -4904,22 +4897,23 @@ HRESULT WINAPI HookedDrawThemeBackgroundEx(
     }
     else if (ThemeClassName == L"Progress")
     {
-        HTHEME theme = NULL;
-        if (hTheme == (theme = OpenThemeData(WindowFromDC(hdc), L"Indeterminate::Progress")))
+        HTHEME hThemeProgress = NULL;
+        if (hTheme == SetThemeHandle(WindowFromDC(hdc), hThemeProgress, L"Indeterminate::Progress"))
         {
             if (PaintIndeterminateProgressBar(hdc, iPartId, iStateId, pRect))
             {
-                CloseThemeData(theme);
+                CloseThemeData(hThemeProgress);
                 return S_OK;
             }
-            CloseThemeData(theme);
         }
         else if (PaintProgressBar(hdc, iPartId, iStateId, pRect)) 
         {
-            CloseThemeData(theme);
+            CloseThemeData(hThemeProgress);
             return S_OK;
         }
-        CloseThemeData(theme);
+
+        if (hThemeProgress)
+            CloseThemeData(hThemeProgress);
     } 
     else if (ThemeClassName == L"CommandModule")
     {
@@ -5945,20 +5939,19 @@ void __thiscall Hooked_CNscTree_DrawDivider(CNscTree *__this, HDC hdc, struct _T
         hwndTreeView = GetTreeViewHWND();
     
     if (!IsWindow(hwndTreeView) || !IsWindowClass(hwndTreeView, L"SysTreeView32"))
-        Fallback(L"Not valid TreeView window");
+        return Fallback(L"Not valid TreeView window");
     
     RECT treeItemRect = {0};
     *reinterpret_cast<HTREEITEM*>(&treeItemRect) = (HTREEITEM)hTreeItem;
     
     if (!SendMessageW(hwndTreeView, TVM_GETITEMRECT, 0, (LPARAM)&treeItemRect))
-        Fallback();
+        return Fallback();
     
     if (!g_d2dFactory)
-        Fallback();
+        return Fallback();
 
-    if (!g_themeCache.navigationdivider[0])
-        if (!g_themeCache.CacheNavigationDivider())
-            Fallback();
+    if (!g_themeCache.navigationdivider[0] && !g_themeCache.CacheNavigationDivider())
+        return Fallback();
     
     RECT lineRc = treeItemRect;
     INT middlePoint = RECTHEIGHT(&treeItemRect) / 4.f;
@@ -6370,8 +6363,8 @@ VOID LoadWindowProcessRules()
 
             BOOL globalSetting_SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
 
-            // Reset system colors to default values ​​if the system color setting is disabled for the specific ruled process.
-            // Hook all necessary API to restore system colors.
+            // Reset system colors to default values if the system color setting is disabled for the specific ruled process,
+            // Hook all necessary API to restore system colors
             if (!g_settings.SetSystemColors && globalSetting_SetSystemColors) {
                 g_DefaultSysColors = TRUE;
                 WindhawkUtils::SetFunctionHook(GetSysColor, HookedGetSysColor, &GetSysColor_orig);
