@@ -232,6 +232,9 @@ std::wstring GetCurrentWindowsThemePath();
 SRWLOCK g_ThemeChangeLock = SRWLOCK_INIT;
 std::wstring g_LastThemePath = GetCurrentWindowsThemePath();
 
+// Flag to prevent customizing text colors of Task Manager
+BOOL g_InsideTaskMgrProc = FALSE;
+
 using PUNICODE_STRING = PVOID;
 constexpr auto MENUPOPUP_CLASS = L"#32768";
 constexpr UINT THEMECLS_COMMONPROPS_PART = 0;
@@ -5740,7 +5743,7 @@ VOID User32Hooks(BOOL areSysColorsApplied)
 void (__fastcall *SHThemeDrawText_orig)(void*, HDC, int, int, DTTOPTS*, LPCWSTR, LPRECT, int, UINT, int, __int64, COLORREF, COLORREF a13);
 void __fastcall Hooked_SHThemeDrawText(void *a1, HDC a2, int a3, int a4, DTTOPTS *a5, LPCWSTR lpString, LPRECT lprc, int a8, UINT format, int a10, __int64 a11, COLORREF color, COLORREF a13)
 {
-    if (!InTaskManagerProcess())
+    if (!g_InsideTaskMgrProc)
         color = g_IsSysThemeDarkMode && (color & 0x00ffffff) <= RGB(96, 96, 96) ? RGB(255, 255, 255) : !g_IsSysThemeDarkMode ? RGB(0, 0, 0) : color;
     
     SHThemeDrawText_orig(a1, a2, a3, a4, a5, lpString, lprc, a8, format, a10, a11, color, a13);
@@ -6444,6 +6447,8 @@ BOOL Wh_ModInit(VOID)
 {
     if (InExplorerProcess())
         g_explorerStylerNoBackgroundEffectAtom = AddAtom(L"WindhawkFileExplorerStylerNoBackgroundEffect");
+    if (InTaskManagerProcess())
+        g_InsideTaskMgrProc = TRUE;
 
     LoadSettings();
 
