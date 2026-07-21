@@ -215,6 +215,9 @@ typedef BOOL(WINAPI* pShouldSystemUseDarkMode)();
 static auto ShouldSystemUseDarkMode = (pShouldSystemUseDarkMode)GetProcAddress(GetModuleHandle(L"uxtheme.dll"), MAKEINTRESOURCEA(138));
 BOOL g_IsSysThemeDarkMode = ShouldSystemUseDarkMode();
 
+// Global theme handle used for SysColors OpenThemeData usage
+HTHEME g_hThemeSysMetrics = nullptr;
+
 // Treeview window handle used in our CNscTree_DrawDivider() hook to draw our alpha blended navigation pane divider
 thread_local HWND tl_hwndTreeView = nullptr;
 
@@ -1144,29 +1147,34 @@ constexpr INT SysColorElements[] = {
     COLOR_HOTLIGHT
 };
 
+BOOL SetCurrentTheme(LPCWSTR themeclass)
+{
+    if (g_hThemeSysMetrics != nullptr)
+        g_hThemeSysMetrics = nullptr;
+
+    g_hThemeSysMetrics = OpenThemeData(NULL, themeclass);
+    if (!g_hThemeSysMetrics)
+        CloseThemeData(g_hThemeSysMetrics);
+    return (g_hThemeSysMetrics) ? TRUE : FALSE;
+}
+
 void ClearSysColorsRegKey() {
     RegDeleteTreeW(HKEY_CURRENT_USER, L"Control Panel\\Colors");
 }
 
-HTHEME SetThemeHandle(HWND hWnd, HTHEME& hTheme, LPCWSTR themeclass)
-{
-    return hTheme = OpenThemeData(hWnd, themeclass);
-}
-
 VOID RevertSysColors()
 {
-    HTHEME hThemeSysMetrics = nullptr;
-    if (!SetThemeHandle(nullptr, hThemeSysMetrics, L"sysmetrics"))
+    if (!SetCurrentTheme(L"sysmetrics"))
         return;
     
     COLORREF aNewColors[ARRAYSIZE(SysColorElements)];
 
     for (UINT i = 0; i < ARRAYSIZE(SysColorElements); i++) 
-        aNewColors[i] = GetThemeSysColor(hThemeSysMetrics, i); 
+        aNewColors[i] = GetThemeSysColor(g_hThemeSysMetrics, i); 
     SetSysColors(ARRAYSIZE(SysColorElements), SysColorElements, aNewColors); 
 
-    CloseThemeData(hThemeSysMetrics);
-    hThemeSysMetrics = nullptr;
+    CloseThemeData(g_hThemeSysMetrics);
+    g_hThemeSysMetrics = nullptr;
 
     //ClearSysColorsRegKey();
 }
@@ -1685,40 +1693,40 @@ public:
     std::array<HDC, 1> dragdrop;
     std::array<HDC, 8> spin;
 
-    BOOL CachePushButton(HDC, INT, INT);
-    BOOL CacheRadioButton(HDC, LPCRECT, INT, INT);
-    BOOL CacheCheckButton(HDC, LPCRECT, INT, INT);
-    BOOL CacheCommandlinkButton(HDC, INT, INT);
-    BOOL CacheCommandlinkGlyph(HDC, INT, INT);
-    BOOL CacheListItem(HDC, INT, INT, INT);
-    BOOL CacheListGroupHeader(HDC, INT, INT, INT);
-    BOOL CacheScrollbar(HDC, INT, INT, INT);
-    BOOL CacheScrollArrow(HDC, INT, INT);
-    BOOL CacheTab(HDC, INT, INT);
-    BOOL CacheCombobox(HDC, INT, INT, INT);
-    BOOL CacheEditBox(HDC, INT, INT, INT);
-    BOOL CacheTreeViewButton(HDC, INT, INT, INT);
-    BOOL CacheTreeViewGlyph(HDC, INT, INT, INT, BOOL);
-    BOOL CacheItemsView(HDC, INT, INT, INT);
-    BOOL CacheProgressBar(HDC, INT, INT, INT);
-    BOOL CacheIndeterminateBar(HDC, INT, INT);
-    BOOL CacheTrackBar(HDC, INT, INT);
-    BOOL CacheTrackBarThumb(HDC, INT, INT, INT);
-    BOOL CacheTrackBarPointedThumb(HDC, INT, INT, INT);
-    BOOL CacheHeader(HDC, INT, INT);
-    BOOL CachePreviewPaneSeparator(HDC);
-    BOOL CacheModuleButton(HDC, INT, INT);
-    BOOL CacheModuleLocationButton(HDC, INT, INT);
-    BOOL CacheModuleSplitButton(HDC,INT, INT, INT);
-    BOOL CacheNavigationButton(HDC, INT, INT, INT);
-    BOOL CacheNavigationDivider(HDC);
-    BOOL CacheToolbarButton(HDC, INT, INT);
-    BOOL CacheAddressBand(HDC, INT, INT);
-    BOOL CacheMenuItem(HDC, INT, INT, INT);
-    BOOL CacheDragDrop(HDC);
-    BOOL CacheSpinButton(HDC, INT, INT, INT);
+    BOOL CachePushButton(INT, INT);
+    BOOL CacheRadioButton(LPCRECT, INT, INT);
+    BOOL CacheCheckButton(LPCRECT, INT, INT);
+    BOOL CacheCommandlinkButton(INT, INT);
+    BOOL CacheCommandlinkGlyph(INT, INT);
+    BOOL CacheListItem(INT, INT, INT);
+    BOOL CacheListGroupHeader(INT, INT, INT);
+    BOOL CacheScrollbar(INT, INT, INT);
+    BOOL CacheScrollArrow(INT, INT);
+    BOOL CacheTab(INT, INT);
+    BOOL CacheCombobox(INT, INT, INT);
+    BOOL CacheEditBox(INT, INT, INT);
+    BOOL CacheTreeViewButton(INT, INT, INT);
+    BOOL CacheTreeViewGlyph(INT, INT, INT, BOOL);
+    BOOL CacheItemsView(INT, INT, INT);
+    BOOL CacheProgressBar(INT, INT, INT);
+    BOOL CacheIndeterminateBar(INT, INT);
+    BOOL CacheTrackBar(INT, INT);
+    BOOL CacheTrackBarThumb(INT, INT, INT);
+    BOOL CacheTrackBarPointedThumb(INT, INT, INT);
+    BOOL CacheHeader(INT, INT);
+    BOOL CachePreviewPaneSeparator();
+    BOOL CacheModuleButton(INT, INT);
+    BOOL CacheModuleLocationButton(INT, INT);
+    BOOL CacheModuleSplitButton(INT, INT, INT);
+    BOOL CacheNavigationButton(INT, INT, INT);
+    BOOL CacheNavigationDivider();
+    BOOL CacheToolbarButton(INT, INT);
+    BOOL CacheAddressBand(INT, INT);
+    BOOL CacheMenuItem(INT, INT, INT);
+    BOOL CacheDragDrop();
+    BOOL CacheSpinButton(INT, INT, INT);
 
-    BOOL CreateDIB(HDC& elementHdc, HDC hDC, INT Width, INT Height)
+    BOOL CreateDIB(HDC& elementHdc, INT Width, INT Height)
     {
         if (elementHdc)
             DeleteHDC(elementHdc);
@@ -1926,7 +1934,7 @@ BOOL PaintScroll(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     if (iPartId == SBP_THUMBBTNHORZ) index += 2;
 
     if (!g_themeCache.scrollbar[index])
-        if (!g_themeCache.CacheScrollbar(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheScrollbar(iPartId, iStateId, index))
             return FALSE;
 
     FillRect(hdc, pRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
@@ -1934,7 +1942,7 @@ BOOL PaintScroll(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     return TRUE;
 }
 
-BOOL CThemeCache::CacheScrollbar(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheScrollbar(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 17 * scale, height = 11 * scale;
@@ -1942,7 +1950,7 @@ BOOL CThemeCache::CacheScrollbar(HDC hdc, INT iPartId, INT iStateId, INT stateIn
         width = 20 * scale, height = 17 * scale;
     FLOAT cornerRadius = 4.f * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.scrollbar[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.scrollbar[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2082,19 +2090,19 @@ BOOL PaintPushButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect, LPCRECT 
     : (iStateId == PBS_DISABLED) ? 3 : 0;
 
     if (!g_themeCache.pushbutton[index])
-        if (!g_themeCache.CachePushButton(hdc, iStateId, index))
+        if (!g_themeCache.CachePushButton(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.pushbutton[index], &clipRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CachePushButton(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CachePushButton(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 18, height = 18;
     FLOAT cornerRadius = 3.f * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.pushbutton[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.pushbutton[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2134,18 +2142,18 @@ BOOL PaintRadioButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = iStateId - 1;
 
     if (!g_themeCache.radiobutton[index])
-        if (!g_themeCache.CacheRadioButton(hdc, pRect, iStateId, index))
+        if (!g_themeCache.CacheRadioButton(pRect, iStateId, index))
             return FALSE;
     // Some theme parts are always fixed size so no stretching is needed
     DrawNineGridStretch(hdc, g_themeCache.radiobutton[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheRadioButton(HDC hdc, LPCRECT pRect,  INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheRadioButton(LPCRECT pRect,  INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT width = RECTWIDTH(pRect), height = RECTHEIGHT(pRect);
-    if (!g_themeCache.CreateDIB(g_themeCache.radiobutton[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.radiobutton[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2232,19 +2240,19 @@ BOOL PaintCheckBox(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = iStateId - 1;
 
     if (!g_themeCache.checkbutton[index])
-        if (!g_themeCache.CacheCheckButton(hdc, pRect, iStateId, index))
+        if (!g_themeCache.CacheCheckButton(pRect, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.checkbutton[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheCheckButton(HDC hdc, LPCRECT pRect, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheCheckButton(LPCRECT pRect, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT width = RECTWIDTH(pRect), height = RECTHEIGHT(pRect);
     FLOAT cornerRadius = 3.f * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.checkbutton[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.checkbutton[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2412,19 +2420,19 @@ BOOL PaintCommandLink(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     : (iStateId == CMDLS_PRESSED) ? 2 : 3;
 
     if (!g_themeCache.commandlinkbutton[index])
-        if (!g_themeCache.CacheCommandlinkButton(hdc, iStateId, index))
+        if (!g_themeCache.CacheCommandlinkButton(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.commandlinkbutton[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheCommandlinkButton(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheCommandlinkButton(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 18, height = 18;
     FLOAT cornerRadius = 4.f * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.commandlinkbutton[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.commandlinkbutton[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2471,18 +2479,18 @@ BOOL PaintCommandLinkGlyph(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     : (iStateId == CMDLGS_DISABLED) ? 3 : 0;
 
     if (!g_themeCache.commandlinkglyph[index])
-        if (!g_themeCache.CacheCommandlinkGlyph(hdc, iStateId, index))
+        if (!g_themeCache.CacheCommandlinkGlyph(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.commandlinkglyph[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheCommandlinkGlyph(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheCommandlinkGlyph(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT x = 0;
     INT width = 20 * scale, height = 20 * scale;
-    if (!g_themeCache.CreateDIB(g_themeCache.commandlinkglyph[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.commandlinkglyph[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2534,11 +2542,11 @@ BOOL CThemeCache::CacheCommandlinkGlyph(HDC hdc, INT iStateId, INT stateIndex)
 
 BOOL SanitizeAddressCombobox(HTHEME hTheme, HDC hdc, INT iPartId, INT iStateId)
 {
-    HTHEME hThemeAddressCB = nullptr;
-    if (SetThemeHandle(WindowFromDC(hdc), hThemeAddressCB, L"AddressComposited::ComboBox")
+    HTHEME MyhTheme = nullptr;
+    if ((MyhTheme = OpenThemeData(WindowFromDC(hdc), L"AddressComposited::ComboBox")) 
     && (iPartId == CP_BORDER || iPartId == CP_TRANSPARENTBACKGROUND))
     {
-        CloseThemeData(hThemeAddressCB);
+        CloseThemeData(MyhTheme);
         return TRUE;
     }
     return FALSE;
@@ -2552,19 +2560,19 @@ BOOL PaintCombobox(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iPartId == CP_READONLY) ? iStateId - 1 : iStateId + 3;
     
     if (!g_themeCache.combobox[index])
-        if (!g_themeCache.CacheCombobox(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheCombobox(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.combobox[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheCombobox(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheCombobox(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 3.f * scale;
     INT width = 18, height = 18;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.combobox[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.combobox[stateIndex], width, height))
         return FALSE;
     
     // Direct2D render target
@@ -2624,12 +2632,13 @@ BOOL CThemeCache::CacheCombobox(HDC hdc, INT iPartId, INT iStateId, INT stateInd
 
 BOOL IsAddressInnerBackground(HTHEME hTheme, HDC hdc, INT iPartId)
 {
-    HTHEME hThemeAddress = NULL;
-    if (SetThemeHandle(WindowFromDC(hdc), hThemeAddress, L"AddressComposited::Edit") && iPartId == EP_BACKGROUNDWITHBORDER)
+    HTHEME theme = NULL;
+    if ((theme = OpenThemeData(WindowFromDC(hdc), L"AddressComposited::Edit")) && iPartId == EP_BACKGROUNDWITHBORDER)
     {
-        CloseThemeData(hThemeAddress);
+        CloseThemeData(theme);
         return TRUE;
     }
+    CloseThemeData(theme);
     return FALSE;
 }
 
@@ -2649,7 +2658,7 @@ BOOL PaintEditBox(HTHEME hTheme, HDC hdc, INT iPartId, INT iStateId, LPCRECT pRe
     INT index = (iPartId == EP_BACKGROUNDWITHBORDER) ? 3 : (iStateId == 1) ? 0 : iStateId - 2;
 
     if (!g_themeCache.editbox[index])
-        if (!g_themeCache.CacheEditBox(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheEditBox(iPartId, iStateId, index))
             return FALSE;
     // hide the borders of the inner black background of EP_BACKGROUNDWITHBORDER theme class by expanding the black drawing.
     RECT rc = (iPartId == EP_BACKGROUNDWITHBORDER) ? RECT{pRect->left-1, pRect->top-1, pRect->right+3,pRect->bottom+1} : *pRect;
@@ -2657,13 +2666,13 @@ BOOL PaintEditBox(HTHEME hTheme, HDC hdc, INT iPartId, INT iStateId, LPCRECT pRe
     return TRUE;
 }
 
-BOOL CThemeCache::CacheEditBox(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheEditBox(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 3.f * scale;
     INT x = 0, y = 0;
     INT width = 18, height = 18;
-    if(!g_themeCache.CreateDIB(g_themeCache.editbox[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.editbox[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2820,20 +2829,20 @@ BOOL PaintTab(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
               : (iStateId == TIS_HOT) ? 1 : (iStateId == TIS_DISABLED) ? 2 : 3;
 
     if (!g_themeCache.tab[index])
-        if (!g_themeCache.CacheTab(hdc, iStateId, index))
+        if (!g_themeCache.CacheTab(iStateId, index))
             return FALSE;
 
     DrawNineGridStretch(hdc, g_themeCache.tab[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTab(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheTab(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
     INT width = 18, height = 18;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.tab[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.tab[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2889,16 +2898,16 @@ BOOL PaintTrackbar(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iPartId == TKP_TRACK) ? 0 : 1;
 
     if (!g_themeCache.trackbar[index])
-        if (!g_themeCache.CacheTrackBar(hdc, iPartId, index))
+        if (!g_themeCache.CacheTrackBar(iPartId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.trackbar[index], pRect, 2, 2, 2, 2);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTrackBar(HDC hdc, INT iPartId, INT stateIndex)
+BOOL CThemeCache::CacheTrackBar(INT iPartId, INT stateIndex)
 {
     INT width = 6, height = 6;
-    if(!g_themeCache.CreateDIB(g_themeCache.trackbar[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.trackbar[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2926,13 +2935,13 @@ BOOL PaintTrackbarThumb(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iPartId == TKP_THUMB) ? iStateId - 1 : iStateId + 3;
 
     if (!g_themeCache.trackbarthumb[index])
-        if (!g_themeCache.CacheTrackBarThumb(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheTrackBarThumb(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.trackbarthumb[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTrackBarThumb(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheTrackBarThumb(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 3.f * scale;
@@ -2941,7 +2950,7 @@ BOOL CThemeCache::CacheTrackBarThumb(HDC hdc, INT iPartId, INT iStateId, INT sta
     if (iPartId == TKP_THUMBVERT)
         width = std::exchange(height, width);
     
-    if(!g_themeCache.CreateDIB(g_themeCache.trackbarthumb[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.trackbarthumb[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -2974,13 +2983,13 @@ BOOL PaintTrackBarPointedThumb(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect
                 (iPartId == TKP_THUMBLEFT) ? iStateId + 15 : iStateId + 19;
 
     if (!g_themeCache.trackbarthumb[index])
-        if (!g_themeCache.CacheTrackBarPointedThumb(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheTrackBarPointedThumb(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.trackbarthumb[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTrackBarPointedThumb(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheTrackBarPointedThumb(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 11 * scale, height = 19 * scale;
@@ -2988,7 +2997,7 @@ BOOL CThemeCache::CacheTrackBarPointedThumb(HDC hdc, INT iPartId, INT iStateId, 
     if (iPartId == TKP_THUMBLEFT || iPartId == TKP_THUMBRIGHT)
         width = std::exchange(height, width);
     
-    if(!g_themeCache.CreateDIB(g_themeCache.trackbarthumb[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.trackbarthumb[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3114,7 +3123,7 @@ BOOL PaintProgressBar(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
               : (iPartId == PP_CHUNK || iPartId == PP_CHUNKVERT) ? 8 : 9;
     
     if (!g_themeCache.progressbar[index])
-        if (!g_themeCache.CacheProgressBar(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheProgressBar(iPartId, iStateId, index))
             return FALSE;
     if (iPartId == PP_FILL)
         DrawNineGridStretch(hdc, g_themeCache.progressbar[index], pRect, 8, 10, 8, 10);
@@ -3125,7 +3134,7 @@ BOOL PaintProgressBar(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     return TRUE;
 }
 
-BOOL CThemeCache::CacheProgressBar(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheProgressBar(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 3.f * scale;
@@ -3137,7 +3146,7 @@ BOOL CThemeCache::CacheProgressBar(HDC hdc, INT iPartId, INT iStateId, INT state
     else if (iPartId == PP_FILLVERT)
         width = 23, height = 50;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.progressbar[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.progressbar[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3247,13 +3256,13 @@ BOOL PaintIndeterminateProgressBar(HDC hdc, INT iPartId, INT iStateId, LPCRECT p
     }
     
     if (!g_themeCache.indeterminatebar[index])
-        if (!g_themeCache.CacheIndeterminateBar(hdc, iStateId, index))
+        if (!g_themeCache.CacheIndeterminateBar(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.indeterminatebar[index], &overlayRect, 6, 6, 5, 5);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheIndeterminateBar(HDC hdc, INT iPartId, INT stateIndex)
+BOOL CThemeCache::CacheIndeterminateBar(INT iPartId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 3.f * scale;
@@ -3262,7 +3271,7 @@ BOOL CThemeCache::CacheIndeterminateBar(HDC hdc, INT iPartId, INT stateIndex)
     if (iPartId == PP_MOVEOVERLAYVERT)
         width = std::exchange(height, width);
 
-    if(!g_themeCache.CreateDIB(g_themeCache.indeterminatebar[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.indeterminatebar[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3308,18 +3317,18 @@ BOOL PaintListView(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     {
         if (index <= 6)
         {
-            if (!g_themeCache.CacheListItem(hdc, iPartId, iStateId, index))
+            if (!g_themeCache.CacheListItem(iPartId, iStateId, index))
                 return FALSE;
         }
         else
-            if (!g_themeCache.CacheListGroupHeader(hdc, iPartId, iStateId, index))
+            if (!g_themeCache.CacheListGroupHeader(iPartId, iStateId, index))
                 return FALSE;
     }
     DrawNineGridStretch(hdc, g_themeCache.listview[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheListItem(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheListItem(INT iPartId, INT iStateId, INT stateIndex)
 {
     if (iPartId != THEMECLS_COMMONPROPS_PART && iPartId != LVP_LISTITEM)
         return FALSE;
@@ -3329,7 +3338,7 @@ BOOL CThemeCache::CacheListItem(HDC hdc, INT iPartId, INT iStateId, INT stateInd
     INT x = 0, y = 0;
     INT width = 18, height = 18;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.listview[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.listview[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3394,7 +3403,7 @@ BOOL CThemeCache::CacheListItem(HDC hdc, INT iPartId, INT iStateId, INT stateInd
     return TRUE;
 }
 
-BOOL CThemeCache::CacheListGroupHeader(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheListGroupHeader(INT iPartId, INT iStateId, INT stateIndex)
 {
     if (iPartId != LVP_GROUPHEADER && iPartId != LVP_GROUPHEADERLINE && iPartId != LVP_COLUMNDETAIL)
         return FALSE;
@@ -3404,7 +3413,7 @@ BOOL CThemeCache::CacheListGroupHeader(HDC hdc, INT iPartId, INT iStateId, INT s
     INT x = 0, y = 0;
     INT width = (iPartId == LVP_COLUMNDETAIL) ? 2 : 18, height = (iPartId == LVP_COLUMNDETAIL) ? 1 : 18;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.listview[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.listview[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3493,20 +3502,20 @@ BOOL PaintTreeViewButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
                 (iStateId == TREIS_SELECTEDNOTFOCUS) ? 3 : 4;
 
     if (!g_themeCache.treeview[index])
-        if (!g_themeCache.CacheTreeViewButton(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheTreeViewButton(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.treeview[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTreeViewButton(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheTreeViewButton(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 5.f * scale;
     FLOAT x = 0, y = 0;
     INT width = 18, height = 18;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.treeview[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.treeview[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3565,13 +3574,13 @@ BOOL PaintTreeViewGlyph(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     index = (ExplorerTreeView) ? index + 4 : index;
 
     if (!g_themeCache.treeviewglyph[index])
-        if (!g_themeCache.CacheTreeViewGlyph(hdc, iPartId, iStateId, index, ExplorerTreeView))
+        if (!g_themeCache.CacheTreeViewGlyph(iPartId, iStateId, index, ExplorerTreeView))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.treeviewglyph[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTreeViewGlyph(HDC hdc, INT iPartId, INT iStateId, INT stateIndex, BOOL ExplorerTreeView)
+BOOL CThemeCache::CacheTreeViewGlyph(INT iPartId, INT iStateId, INT stateIndex, BOOL ExplorerTreeView)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 9 * scale;
@@ -3580,7 +3589,7 @@ BOOL CThemeCache::CacheTreeViewGlyph(HDC hdc, INT iPartId, INT iStateId, INT sta
     if (ExplorerTreeView)
         width = height = 16 * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.treeviewglyph[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.treeviewglyph[stateIndex], width, height))
         return FALSE;
 
     RECT rc {0, 0, width, height};
@@ -3649,20 +3658,20 @@ BOOL PaintItemsView(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
         return PaintListView(hdc, 1, 2, pRect);
     
     if (!g_themeCache.itemsview[index])
-        if (!g_themeCache.CacheItemsView(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheItemsView(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.itemsview[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheItemsView(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheItemsView(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
     INT x = 0, y = 0;
     INT width = 18, height = 18;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.itemsview[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.itemsview[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3727,20 +3736,20 @@ BOOL PaintHeader(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iStateId % 3 == 2) ? 0 : 1;
     
     if (!g_themeCache.header[index])
-        if (!g_themeCache.CacheHeader(hdc, iStateId, index))
+        if (!g_themeCache.CacheHeader(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.header[index], pRect, 12, 0, 11, 12);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheHeader(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheHeader(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 6.f * scale;
     INT x = 0, y = 0;
     INT width = 24, height = 24;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.header[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.header[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3797,7 +3806,7 @@ BOOL PaintPreviewPaneSeparator(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect
         return FALSE;
 
     if (!g_themeCache.previewseparator[0])
-        if (!g_themeCache.CachePreviewPaneSeparator(hdc))
+        if (!g_themeCache.CachePreviewPaneSeparator())
             return FALSE;
     
     RECT rc{pRect->left+1, pRect->top, pRect->right, pRect->bottom};
@@ -3805,11 +3814,11 @@ BOOL PaintPreviewPaneSeparator(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect
     return TRUE;
 }
 
-BOOL CThemeCache::CachePreviewPaneSeparator(HDC hdc)
+BOOL CThemeCache::CachePreviewPaneSeparator()
 {
     INT x = 0, y = 0;
     INT width = 3, height = 3;
-    if(!g_themeCache.CreateDIB(g_themeCache.previewseparator[0], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.previewseparator[0], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3837,20 +3846,20 @@ BOOL PaintModuleButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = iStateId - 2; 
 
     if (!g_themeCache.modulebutton[index])
-        if (!g_themeCache.CacheModuleButton(hdc, iStateId, index))
+        if (!g_themeCache.CacheModuleButton(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.modulebutton[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheModuleButton(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheModuleButton(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
     INT x = 0, y = 0;
     INT width = 18, height = 18;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.modulebutton[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.modulebutton[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3908,19 +3917,19 @@ BOOL PaintModuleLocation(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = iStateId - 1; 
 
     if (!g_themeCache.modulelocationbutton[index])
-        if (!g_themeCache.CacheModuleLocationButton(hdc, iStateId, index))
+        if (!g_themeCache.CacheModuleLocationButton(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.modulelocationbutton[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheModuleLocationButton(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheModuleLocationButton(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
     INT x = 0, y = 0;
     INT width = 18, height = 18;
-    if(!g_themeCache.CreateDIB(g_themeCache.modulelocationbutton[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.modulelocationbutton[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -3983,21 +3992,21 @@ BOOL PaintModuleSplitButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iPartId == 4) ? iStateId - 2 : iStateId + 2; 
 
     if (!g_themeCache.modulesplitbutton[index])
-        if (!g_themeCache.CacheModuleSplitButton(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheModuleSplitButton(iPartId, iStateId, index))
             return FALSE;
     RECT newRc = (iPartId == 4 && iStateId == 4) ? RECT{pRect->left, pRect->top, pRect->right+2, pRect->bottom} : *pRect;
     DrawNineGridStretch(hdc, g_themeCache.modulesplitbutton[index], &newRc, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheModuleSplitButton(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheModuleSplitButton(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
     INT x = 0, y = 0;
     INT width = 18, height = 18;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.modulesplitbutton[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.modulesplitbutton[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4098,13 +4107,13 @@ BOOL PaintNavigationButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iPartId == NAV_BACKBUTTON) ? iStateId - 1 : (iPartId == NAV_FORWARDBUTTON) ? iStateId + 3 : iStateId + 7;
 
     if (!g_themeCache.navigationbutton[index])
-        if (!g_themeCache.CacheNavigationButton(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheNavigationButton(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.navigationbutton[index], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheNavigationButton(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheNavigationButton(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
@@ -4114,7 +4123,7 @@ BOOL CThemeCache::CacheNavigationButton(HDC hdc, INT iPartId, INT iStateId, INT 
     if (iPartId == NAV_MENUBUTTON)
         width = 13 * scale, height = 27 * scale;
     
-    if(!g_themeCache.CreateDIB(g_themeCache.navigationbutton[stateIndex], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.navigationbutton[stateIndex], width, height))
         return FALSE;
     
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4239,19 +4248,19 @@ BOOL PaintToolbarButton(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iStateId == TS_HOTCHECKED) ? 0 : (iStateId == TS_PRESSED) ? 1 : (iStateId == TS_CHECKED) ? 2 : 3;
 
     if (!g_themeCache.toolbarbutton[index])
-        if (!g_themeCache.CacheToolbarButton(hdc, iStateId, index))
+        if (!g_themeCache.CacheToolbarButton(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.toolbarbutton[index], pRect, 9, 9, 8, 8);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheToolbarButton(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheToolbarButton(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
     INT width = 18, height = 18;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.toolbarbutton[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.toolbarbutton[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4335,19 +4344,19 @@ BOOL PaintAddressBand(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = iStateId - 1;
 
     if (!g_themeCache.addressband[index])
-        if (!g_themeCache.CacheAddressBand(hdc, iStateId, index))
+        if (!g_themeCache.CacheAddressBand(iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.addressband[index], pRect, 12, 12, 11, 11);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheAddressBand(HDC hdc, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheAddressBand(INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 5.f * scale;
     INT width = 24, height = 24;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.addressband[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.addressband[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4402,7 +4411,7 @@ BOOL PaintMenu(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     INT index = (iPartId == MENU_POPUPSEPARATOR) ? 0 : (iPartId == 27 || iPartId == MENU_POPUPITEM) ? 1 : (iPartId == MENU_BARITEM && iStateId == MBI_PUSHED) ?  3 : 2;
 
     if (!g_themeCache.menuitem[index])
-        if (!g_themeCache.CacheMenuItem(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheMenuItem(iPartId, iStateId, index))
             return FALSE;
     if (iPartId != MENU_POPUPSEPARATOR)
         DrawNineGridStretch(hdc, g_themeCache.menuitem[index], pRect, 9, 9, 8, 8);
@@ -4411,7 +4420,7 @@ BOOL PaintMenu(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     return TRUE;
 }
 
-BOOL CThemeCache::CacheMenuItem(HDC hdc, INT iPartId, INT iStateId, INT indexState)
+BOOL CThemeCache::CacheMenuItem(INT iPartId, INT iStateId, INT indexState)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     FLOAT cornerRadius = 4.f * scale;
@@ -4422,7 +4431,7 @@ BOOL CThemeCache::CacheMenuItem(HDC hdc, INT iPartId, INT iStateId, INT indexSta
         height = 5;
     }
 
-    if (!g_themeCache.CreateDIB(g_themeCache.menuitem[indexState], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.menuitem[indexState], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4465,19 +4474,19 @@ BOOL PaintDragDrop(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
         return FALSE;
 
     if (!g_themeCache.dragdrop[0])
-        if (!g_themeCache.CacheDragDrop(hdc))
+        if (!g_themeCache.CacheDragDrop())
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.dragdrop[0], pRect);
     return TRUE;
 }
 
-BOOL CThemeCache::CacheDragDrop(HDC hdc)
+BOOL CThemeCache::CacheDragDrop()
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 108, height = 108;
     FLOAT cornerRadius = 4.f * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.dragdrop[0], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.dragdrop[0], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4574,7 +4583,7 @@ BOOL PaintSpin(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     PatBlt(hdc, pRect->left, pRect->top, RECTWIDTH(pRect), RECTHEIGHT(pRect), BLACKNESS);
 
     if (!g_themeCache.spin[index])
-        if (!g_themeCache.CacheSpinButton(hdc, iPartId, iStateId, index))
+        if (!g_themeCache.CacheSpinButton(iPartId, iStateId, index))
             return FALSE;
     DrawNineGridStretch(hdc, g_themeCache.spin[index], pRect, 6, 5, 6, 5);
 
@@ -4588,13 +4597,13 @@ BOOL PaintSpin(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     }
 }
 
-BOOL CThemeCache::CacheSpinButton(HDC hdc, INT iPartId, INT iStateId, INT stateIndex)
+BOOL CThemeCache::CacheSpinButton(INT iPartId, INT iStateId, INT stateIndex)
 {
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
     INT width = 12, height = 12;
     FLOAT cornerRadius = 2.f * scale;
 
-    if (!g_themeCache.CreateDIB(g_themeCache.spin[stateIndex], hdc, width, height))
+    if (!g_themeCache.CreateDIB(g_themeCache.spin[stateIndex], width, height))
         return FALSE;
 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
@@ -4657,17 +4666,15 @@ HRESULT WINAPI HookedDrawThemeBackground(
             return S_OK;
         else if (iPartId == BP_GROUPBOX)
         {
-            HTHEME hThemeGroupBox = nullptr;
-            if (hTheme == SetThemeHandle(WindowFromDC(hdc), hThemeGroupBox, L"Button"))
+            HTHEME hGroupBoxTheme;
+            if (hTheme == (hGroupBoxTheme = OpenThemeData(WindowFromDC(hdc), L"Button")))
             {
                 if (PaintGroupBox(hdc, iPartId, iStateId, pRect, pClipRect)) {
-                    CloseThemeData(hThemeGroupBox);
+                    CloseThemeData(hGroupBoxTheme);
                     return S_OK;
                 }
             }
-            
-            if (hThemeGroupBox)
-                CloseThemeData(hThemeGroupBox);
+            CloseThemeData(hGroupBoxTheme);
         }
     }
     else if (ThemeClassName == L"Tab")
@@ -4715,23 +4722,22 @@ HRESULT WINAPI HookedDrawThemeBackground(
         // The exported GetThemeClass function does not provide
         // full string of theme class names of derived theme classes
         // Use the OpenThemeData API instead.
-        HTHEME hThemeProgress = NULL;
-        if (hTheme == SetThemeHandle(WindowFromDC(hdc), hThemeProgress, L"Indeterminate::Progress"))
+        HTHEME theme = NULL;
+        if (hTheme == (theme = OpenThemeData(WindowFromDC(hdc), L"Indeterminate::Progress")))
         {
             if (PaintIndeterminateProgressBar(hdc, iPartId, iStateId, pRect))
             {
-                CloseThemeData(hThemeProgress);
+                CloseThemeData(theme);
                 return S_OK;
             }
-            CloseThemeData(hThemeProgress);
+            CloseThemeData(theme);
         }
         else if (PaintProgressBar(hdc, iPartId, iStateId, pRect)) 
         {
-            CloseThemeData(hThemeProgress);
+            CloseThemeData(theme);
             return S_OK;
         }
-        if (hThemeProgress)
-            CloseThemeData(hThemeProgress);
+        CloseThemeData(theme);
     } 
     else if (ThemeClassName == L"ListView")
     {
@@ -4757,13 +4763,14 @@ HRESULT WINAPI HookedDrawThemeBackground(
     }
     else if (ThemeClassName == L"Toolbar")
     {
-        HTHEME hThemeToolbar = NULL;
-        if (SetThemeHandle(WindowFromDC(hdc), hThemeToolbar, L"BB::Toolbar"))
+        HTHEME theme = NULL;
+        if ((theme = OpenThemeData(WindowFromDC(hdc), L"BB::Toolbar")))
         {
             if (PaintToolbarSplitDropDown(hdc, iPartId, iStateId, pRect)) {
-                CloseThemeData(hThemeToolbar);
+                CloseThemeData(theme);
                 return S_OK;
             }
+            CloseThemeData(theme);
         }
         if (PaintToolbarButton(hdc, iPartId, iStateId, pRect))
             return S_OK;
@@ -4779,12 +4786,14 @@ HRESULT WINAPI HookedDrawThemeBackground(
             return S_OK;
         // Force menu white glyphs
         else if (iPartId <= MENU_SYSTEMRESTORE && iPartId >= MENU_SYSTEMCLOSE && g_IsSysThemeDarkMode) {
-            HTHEME hThemeMenu = NULL;
-            if (SetThemeHandle(WindowFromDC(hdc), hThemeMenu, L"DarkMode::Menu")) {
-                auto hr = DrawThemeBackground_orig(hThemeMenu, hdc, iPartId, iStateId, pRect, pClipRect);
-                CloseThemeData(hThemeMenu);
+            HTHEME theme = NULL;
+            HRESULT hr = S_OK;
+            if ((theme = OpenThemeData(WindowFromDC(hdc), L"DarkMode::Menu"))) {
+                hr = DrawThemeBackground_orig(theme, hdc, iPartId, iStateId, pRect, pClipRect);
+                CloseThemeData(theme);
                 return hr;
             }
+            CloseThemeData(theme);
         }
     }
     else if (ThemeClassName == L"DragDrop")
@@ -4834,12 +4843,13 @@ HRESULT WINAPI HookedDrawThemeBackground(
         return S_OK;
     }
     else if (ThemeClassName == L"Toolbar" && iPartId == THEMECLS_COMMONPROPS_PART) {
-        HTHEME hThemeToolbar = nullptr;
-        if ((SetThemeHandle(WindowFromDC(hdc), hThemeToolbar, L"Placesbar::Toolbar"))) {
+        HTHEME Toolbar;
+        if ((Toolbar = OpenThemeData(WindowFromDC(hdc), L"Placesbar::Toolbar"))) {
             FillRect(hdc, pRect, (HBRUSH)GetStockObject(BLACK_BRUSH));
-            CloseThemeData(hThemeToolbar);
+            CloseThemeData(Toolbar);
             return S_OK;
         }
+        CloseThemeData(Toolbar);
     }
     return hr;
 }
@@ -4894,23 +4904,22 @@ HRESULT WINAPI HookedDrawThemeBackgroundEx(
     }
     else if (ThemeClassName == L"Progress")
     {
-        HTHEME hThemeProgress = NULL;
-        if (hTheme == SetThemeHandle(WindowFromDC(hdc), hThemeProgress, L"Indeterminate::Progress"))
+        HTHEME theme = NULL;
+        if (hTheme == (theme = OpenThemeData(WindowFromDC(hdc), L"Indeterminate::Progress")))
         {
             if (PaintIndeterminateProgressBar(hdc, iPartId, iStateId, pRect))
             {
-                CloseThemeData(hThemeProgress);
+                CloseThemeData(theme);
                 return S_OK;
             }
+            CloseThemeData(theme);
         }
         else if (PaintProgressBar(hdc, iPartId, iStateId, pRect)) 
         {
-            CloseThemeData(hThemeProgress);
+            CloseThemeData(theme);
             return S_OK;
         }
-
-        if (hThemeProgress)
-            CloseThemeData(hThemeProgress);
+        CloseThemeData(theme);
     } 
     else if (ThemeClassName == L"CommandModule")
     {
@@ -5882,12 +5891,12 @@ VOID Comctl32Hooks()
     }
 }
 
-BOOL CThemeCache::CacheNavigationDivider(HDC hdc)
+BOOL CThemeCache::CacheNavigationDivider()
 {
     FLOAT x = 0, y = 0;
     FLOAT width = 2, height = 2;
 
-    if(!g_themeCache.CreateDIB(g_themeCache.navigationdivider[0], hdc, width, height))
+    if(!g_themeCache.CreateDIB(g_themeCache.navigationdivider[0], width, height))
         return FALSE;
 
     RECT rc = {(INT)x, (INT)y, (INT)width, (INT)height};
@@ -5936,19 +5945,20 @@ void __thiscall Hooked_CNscTree_DrawDivider(CNscTree *__this, HDC hdc, struct _T
         hwndTreeView = GetTreeViewHWND();
     
     if (!IsWindow(hwndTreeView) || !IsWindowClass(hwndTreeView, L"SysTreeView32"))
-        return Fallback(L"Not valid TreeView window");
+        Fallback(L"Not valid TreeView window");
     
     RECT treeItemRect = {0};
     *reinterpret_cast<HTREEITEM*>(&treeItemRect) = (HTREEITEM)hTreeItem;
     
     if (!SendMessageW(hwndTreeView, TVM_GETITEMRECT, 0, (LPARAM)&treeItemRect))
-        return Fallback();
+        Fallback();
     
     if (!g_d2dFactory)
-        return Fallback();
+        Fallback();
 
-    if (!g_themeCache.navigationdivider[0] && !g_themeCache.CacheNavigationDivider(hdc))
-        return Fallback();
+    if (!g_themeCache.navigationdivider[0])
+        if (!g_themeCache.CacheNavigationDivider())
+            Fallback();
     
     RECT lineRc = treeItemRect;
     INT middlePoint = RECTHEIGHT(&treeItemRect) / 4.f;
@@ -6360,8 +6370,8 @@ VOID LoadWindowProcessRules()
 
             BOOL globalSetting_SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
 
-            // Reset system colors to default values if the system color setting is disabled for the specific ruled process,
-            // Hook all necessary API to restore system colors
+            // Reset system colors to default values ​​if the system color setting is disabled for the specific ruled process.
+            // Hook all necessary API to restore system colors.
             if (!g_settings.SetSystemColors && globalSetting_SetSystemColors) {
                 g_DefaultSysColors = TRUE;
                 WindhawkUtils::SetFunctionHook(GetSysColor, HookedGetSysColor, &GetSysColor_orig);
