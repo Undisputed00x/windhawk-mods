@@ -5198,14 +5198,31 @@ LRESULT STDCALL HookedCThemeMenu_MenuKeyboardMsgProc_orig(INT code, WPARAM wPara
 }
 
 HRESULT (STDCALL *_GetBrushesForPart_orig)(HTHEME hTheme, int iPartId, COLORREF Color, HBITMAP *phBitmap, HBRUSH *phBrush);
-HRESULT STDCALL Hooked_GetBrushesForPart(HTHEME hTheme, int iPartId, COLORREF Color, HBITMAP *phBitmap, HBRUSH * phBrush)
+HRESULT STDCALL Hooked_GetBrushesForPart(HTHEME hTheme, int iPartId, COLORREF Color, HBITMAP *phBitmap, HBRUSH *phBrush)
 {
     std::wstring ThemeClass = GetThemeClass(hTheme);
     
     if (ThemeClass == L"Tab" && (iPartId == TABP_BODY || iPartId == TABP_AEROWIZARDBODY)) {
-        *phBrush = GetSysColorBrush(COLOR_WINDOW);
+        
+        // 1. Respect the early exit to prevent cache corruption and GDI leaks
+        if (phBrush && *phBrush) {
+            return S_OK; 
+        }
+
+        // 2. Assign a pure black brush.
+        // CreateSolidBrush because the stock object cannot be accidentally destroyed.
+        if (phBrush) {
+            *phBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
+        }
+        
+        // 3. Prevent uxtheme from reading garbage memory for the pattern bitmap
+        if (phBitmap) {
+            *phBitmap = NULL;
+        }
+        
         return S_OK;
     }
+    
     return _GetBrushesForPart_orig(hTheme, iPartId, Color, phBitmap, phBrush);
 }
 
