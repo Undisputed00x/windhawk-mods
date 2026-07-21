@@ -139,8 +139,7 @@ This is caused by default by the AccentBlur API.❕
           - SysColors: FALSE
             $name: 🔷 New system colors
             $description: >-
-             ⚠️Effective if global setting "New System Colors" is disabled.
-              Modifies additional system UI colors by hooking to GetSysColor/GetSysColorBrush API.  
+              Modifies additional system UI colors.
           - AccentColorControls: FALSE
             $name: 🔷 Windows theme accent colorizer
             $description: >-
@@ -171,6 +170,7 @@ This is caused by default by the AccentBlur API.❕
 // ==/WindhawkModSettings==
 
 #include <windhawk_utils.h>
+#include <windowsx.h>
 #include <dwmapi.h>
 #include <vssym32.h>
 #include <uxtheme.h>
@@ -183,8 +183,6 @@ This is caused by default by the AccentBlur API.❕
 
 #define RECTWIDTH(lprc)     ((lprc)->right - (lprc)->left)
 #define RECTHEIGHT(lprc)    ((lprc)->bottom - (lprc)->top)
-
-#define WM_CTLCOLOR 0x19
 
 static UINT ENABLE = 1;
 static constexpr UINT AUTO = 0; // DWMSBT_AUTO
