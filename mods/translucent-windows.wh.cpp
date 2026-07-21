@@ -222,8 +222,8 @@ thread_local HWND tl_hwndTreeView = nullptr;
 // when custom system colors are applied in global settings.
 BOOL g_DefaultSysColors = FALSE;
 // Global system colors buffers like Windows does.
-std::array<HBRUSH, COLOR_MENUBAR> g_themeCachedCustomSysColorBrushes {nullptr};
-std::array<HBRUSH, COLOR_MENUBAR> g_themeCachedDefaultSysColorBrushes {nullptr};
+std::array<HBRUSH, COLOR_MENUBAR + 1> g_themeCachedCustomSysColorBrushes {nullptr};
+std::array<HBRUSH, COLOR_MENUBAR + 1> g_themeCachedDefaultSysColorBrushes {nullptr};
 SRWLOCK g_SysColorsLock = SRWLOCK_INIT;
 
 // Helpers for resetting theming containers and attributes
@@ -1264,16 +1264,19 @@ COLORREF WINAPI HookedGetSysColor(INT nIndex)
 
 HBRUSH WINAPI HookedGetSysColorBrush(INT nIndex) 
 {
+    if (nIndex < 0 || nIndex > COLOR_MENUBAR)
+        return GetSysColorBrush_orig(nIndex);
+    
     auto& cacheArray = g_DefaultSysColors ? g_themeCachedDefaultSysColorBrushes : g_themeCachedCustomSysColorBrushes;
     
-    HBRUSH cachedBrush = cacheArray[nIndex-1];
+    HBRUSH cachedBrush = cacheArray[nIndex];
     
     if (cachedBrush && GetObjectType(cachedBrush) == OBJ_BRUSH)
         return cachedBrush; 
 
     AcquireSRWLockExclusive(&g_SysColorsLock);
     
-    HBRUSH& refSysBrush = cacheArray[nIndex-1];
+    HBRUSH& refSysBrush = cacheArray[nIndex];
     
     if (refSysBrush && GetObjectType(refSysBrush) != OBJ_BRUSH)
         refSysBrush = NULL; 
@@ -1720,6 +1723,7 @@ public:
 
     BOOL CreateDIB(HDC& elementHdc, INT Width, INT Height)
     {
+        Wh_Log(L"CreateDIB");
         if (elementHdc)
             DeleteHDC(elementHdc);
 
@@ -5209,7 +5213,7 @@ HRESULT STDCALL Hooked_GetBrushesForPart(HTHEME hTheme, int iPartId, COLORREF Co
             return S_OK; 
         }
 
-        // 2. Assign a pure black brush.
+        // 2. Assign a pure black brush. GetStockObject is safer here than 
         // CreateSolidBrush because the stock object cannot be accidentally destroyed.
         if (phBrush) {
             *phBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
