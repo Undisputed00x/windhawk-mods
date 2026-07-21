@@ -6365,7 +6365,7 @@ VOID LoadWindowProcessRules()
             if (!g_settings.FillBg && globalSetting_SetSysColorAPI)
                 g_DefaultSysColors = TRUE;
             
-            // Hook all necessary APIs to restore system colors when SetSysColors API hasn't been executed by the mod
+            // Hook all necessary APIs to restore system colors when SetSysColors API has been executed by the mod
             if (g_DefaultSysColors) {
                 WindhawkUtils::SetFunctionHook(GetSysColor, HookedGetSysColor, &GetSysColor_orig);
                 WindhawkUtils::SetFunctionHook(GetSysColorBrush, HookedGetSysColorBrush, &GetSysColorBrush_orig);               
