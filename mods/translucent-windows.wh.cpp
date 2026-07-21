@@ -93,7 +93,7 @@ This is caused by default by the AccentBlur API.❕
     - SysColors: FALSE
       $name: 🔷 New system colors
       $description: >-
-       Modifies additional system UI colors by calling SetSysColors API.
+       Modifies additional system UI colors by calling SetSysColors API. (Requires Windows theme custom rendering)
         ⚠️For issues with excluded processes, use process rules in mod's settings. For more refer to the FAQ.
     - AccentColorControls: TRUE
       $name: 🔷 Windows theme accent colorizer
@@ -136,10 +136,6 @@ This is caused by default by the AccentBlur API.❕
             $description: >-
               Modifies parts of the Windows theme using the Direct2D graphics API and modifies Windows GDI text rendering by patching the alpha channel and adjusting text colors.
                ✨It is recommended to enable this with background translucent effects.
-          - SysColors: FALSE
-            $name: 🔷 New system colors
-            $description: >-
-              Modifies additional system UI colors.
           - AccentColorControls: FALSE
             $name: 🔷 Windows theme accent colorizer
             $description: >-
@@ -837,7 +833,7 @@ std::wstring GetThemeClass(HTHEME hTheme)
 // Brightens antialiased edge pixels
 // Closely matches DrawTextWithGlow's CGamma table behavior
 // Requires no RGB linearization — operates on alpha only
-static std::array<BYTE, 256> g_textAlphaGammaLUT = {1};
+static std::array<BYTE, 256> g_textAlphaGammaLUT = {0};
 VOID GenerateTextAlphaGammaLUT()
 {
     for (int i = 0; i < 256; ++i) 
@@ -5094,9 +5090,6 @@ static LRESULT WINAPI HookedDefWindowProcW(HWND hWnd, UINT msg, WPARAM wParam, L
 
                 for (HBRUSH brush : g_themeCachedCustomSysColorBrushes)
                     DeleteObject(brush);
-                
-                if (g_settings.SetSystemColors)
-                    ColorizeSysColors();
             }
             
             ReleaseSRWLockExclusive(&g_ThemeChangeLock);
@@ -5205,24 +5198,10 @@ HRESULT STDCALL Hooked_GetBrushesForPart(HTHEME hTheme, int iPartId, COLORREF Co
     std::wstring ThemeClass = GetThemeClass(hTheme);
     
     if (ThemeClass == L"Tab" && (iPartId == TABP_BODY || iPartId == TABP_AEROWIZARDBODY)) {
-        
-        // 1. Respect the early exit to prevent cache corruption and GDI leaks
-        if (phBrush && *phBrush) {
-            return S_OK; 
+        if (!*phBrush || *phBrush != GetSysColorBrush(COLOR_WINDOW)) {
+            *phBrush = GetSysColorBrush(COLOR_WINDOW);
+            return S_OK;
         }
-
-        // 2. Assign a pure black brush.
-        // CreateSolidBrush because the stock object cannot be accidentally destroyed.
-        if (phBrush) {
-            *phBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
-        }
-        
-        // 3. Prevent uxtheme from reading garbage memory for the pattern bitmap
-        if (phBitmap) {
-            *phBitmap = NULL;
-        }
-        
-        return S_OK;
     }
     
     return _GetBrushesForPart_orig(hTheme, iPartId, Color, phBitmap, phBrush);
@@ -5336,13 +5315,6 @@ VOID RestoreWindowCustomizations(HWND hWnd)
 {
     if(!IsWindowEligible(hWnd))
         return;
-    
-    // Manually restore frame extension
-    if(!(IsWindowClass(hWnd,  L"TaskManagerWindow") && g_settings.BgType != g_settings.Default))
-    {
-        MARGINS margins = { 0, 0, 0, 0 };
-        DwmExtendFrameIntoClientArea(hWnd, &margins);
-    }
 
     ACCENT_POLICY accentPolicy = {};
     WINCOMPATTRDATA winCompositionAttrib = {};
@@ -5350,10 +5322,10 @@ VOID RestoreWindowCustomizations(HWND hWnd)
 
     // Disabling AccentBlurBehind temp workaround
     dwmBlurBehindData.fEnable = FALSE;
-    dwmBlurBehindData.hRgnBlur = NULL;
+    dwmBlurBehindData.dwFlags = DWM_BB_ENABLE;
     DwmEnableBlurBehindWindow(hWnd, &dwmBlurBehindData);
 
-    accentPolicy.AccentState = 0;
+    accentPolicy.AccentState = ACCENT_STATE_DISABLED;
 
     winCompositionAttrib.Attrib = WCA_ACCENT_POLICY;
     winCompositionAttrib.pvData = &accentPolicy;
@@ -5361,7 +5333,15 @@ VOID RestoreWindowCustomizations(HWND hWnd)
 
     SetWindowCompositionAttribute(hWnd, &winCompositionAttrib);
     
-    DwmSetWindowAttribute(hWnd, DWMWA_SYSTEMBACKDROP_TYPE , &AUTO, sizeof(UINT));
+    DWM_SYSTEMBACKDROP_TYPE backdrop = DWMSBT_NONE;
+    DwmSetWindowAttribute(hWnd, DWMWA_SYSTEMBACKDROP_TYPE , &backdrop, sizeof(UINT));
+
+    // Manually restore frame extension
+    if(!(IsWindowClass(hWnd,  L"TaskManagerWindow") && g_settings.BgType != g_settings.Default))
+    {
+        MARGINS margins = { 0, 0, 0, 0 };
+        DwmExtendFrameIntoClientArea(hWnd, &margins);
+    }
 }
 
 BOOL CALLBACK EnumWindowsProc(HWND hWnd, LPARAM lParam) 
@@ -5672,7 +5652,6 @@ void __fastcall HookedRenderTooltip(HWND hWnd, HDC hdc, HGDIOBJ *a3)
 
 VOID User32Hooks(BOOL areSysColorsApplied)
 {
-    //WindhawkUtils::SetFunctionHook(SetClassLongPtrW, HookedSetClassLongPtrW, &SetClassLongPtrW_orig);
     WindhawkUtils::SYMBOL_HOOK user32_dll_hooks[] =
     {  
         {
@@ -6261,8 +6240,6 @@ VOID ApplyHooks()
 {
     if(g_settings.FillBg)
         CustomRenderingHooks();
-    if (g_settings.SetSystemColors)
-        ColorizeSysColors();
     if (g_settings.BgType != g_settings.Default) {
         DwmSetWindowAttributeHook();
         DwmExpandFrameIntoClientAreaHook();
@@ -6374,23 +6351,28 @@ VOID LoadWindowProcessRules()
         {
             g_settings.FillBg = Wh_GetIntSetting(L"RuledPrograms[%d].RenderingMod.ThemeBackground", i);
             
+            BOOL globalSetting_CustomTheme = Wh_GetIntSetting(L"RenderingMod.ThemeBackground");
+            if (!globalSetting_CustomTheme)
+                GenerateTextAlphaGammaLUT();
+            
             g_settings.AccentColorize = Wh_GetIntSetting(L"RuledPrograms[%d].RenderingMod.AccentColorControls", i);
             if (g_settings.AccentColorize)
                 g_settings.AccentColorize = GetAccentColor(g_settings.AccentColor);
             
-            g_settings.SetSystemColors = Wh_GetIntSetting(L"RuledPrograms[%d].RenderingMod.Syscolors", i);
+            BOOL globalSetting_SetSysColorAPI = Wh_GetIntSetting(L"RenderingMod.Syscolors");
 
-            BOOL globalSetting_SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
-
-            // Reset system colors to default values if the system color setting is disabled for the specific ruled process,
-            // Hook all necessary API to restore system colors
-            if (!g_settings.SetSystemColors && globalSetting_SetSystemColors) {
+            // Reset system colors to default values if the system color setting is disabled for the specific ruled process
+            if (!g_settings.FillBg && globalSetting_SetSysColorAPI)
                 g_DefaultSysColors = TRUE;
+            
+            // Hook all necessary APIs to restore system colors when SetSysColors API hasn't been executed by the mod
+            if (g_DefaultSysColors) {
                 WindhawkUtils::SetFunctionHook(GetSysColor, HookedGetSysColor, &GetSysColor_orig);
-                WindhawkUtils::SetFunctionHook(GetSysColorBrush, HookedGetSysColorBrush, &GetSysColorBrush_orig);
-                User32Hooks(g_settings.SetSystemColors);
+                WindhawkUtils::SetFunctionHook(GetSysColorBrush, HookedGetSysColorBrush, &GetSysColorBrush_orig);               
                 WindhawkUtils::SetFunctionHook(FillRect, HookedFillRect, &FillRect_orig);
-            }          
+                User32Hooks(g_settings.SetSystemColors);
+            }   
+
             auto strStyle = WindhawkUtils::StringSetting(Wh_GetStringSetting(L"RuledPrograms[%d].BackgroundEffects.type", i));
             if (0 == wcscmp(strStyle, L"acrylicblur"))
                 g_settings.BgType = g_settings.AccentBlurBehind;
@@ -6419,7 +6401,8 @@ VOID LoadSettings()
         GenerateTextAlphaGammaLUT();
     
     g_settings.SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
-    if (g_settings.SetSystemColors)
+    // SetSysColors API available only in theme customization
+    if (g_settings.SetSystemColors && g_settings.FillBg)
         ColorizeSysColors();
     
     auto strStyle = WindhawkUtils::StringSetting(Wh_GetStringSetting(L"BackgroundEffects.type"));
@@ -6499,7 +6482,6 @@ VOID Wh_ModUninit(VOID)
 
 BOOL Wh_ModSettingsChanged(BOOL* bReload) 
 {
-    Wh_Log(L"SettingsChanged");
     *bReload = TRUE;
     return TRUE;
 }
