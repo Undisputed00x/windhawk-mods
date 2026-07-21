@@ -978,8 +978,6 @@ BOOL WINAPI HookedExtTextOutW(
 
     EndBufferedPaint(hpb, FALSE);
     return res;
-
-    return res;
 }
 
 // Bypass alpha blending operation done by default (e.g context menus, win32 adressbar) as it is done by our ExtTextOutW hook.
@@ -1276,14 +1274,14 @@ HBRUSH WINAPI HookedGetSysColorBrush(INT nIndex)
 {
     auto& cacheArray = g_DefaultSysColors ? g_themeCachedDefaultSysColorBrushes : g_themeCachedCustomSysColorBrushes;
     
-    HBRUSH cachedBrush = cacheArray[nIndex];
+    HBRUSH cachedBrush = cacheArray[nIndex-1];
     
     if (cachedBrush && GetObjectType(cachedBrush) == OBJ_BRUSH)
         return cachedBrush; 
 
     AcquireSRWLockExclusive(&g_SysColorsLock);
     
-    HBRUSH& refSysBrush = cacheArray[nIndex];
+    HBRUSH& refSysBrush = cacheArray[nIndex-1];
     
     if (refSysBrush && GetObjectType(refSysBrush) != OBJ_BRUSH)
         refSysBrush = NULL; 
@@ -5097,6 +5095,9 @@ static LRESULT WINAPI HookedDefWindowProcW(HWND hWnd, UINT msg, WPARAM wParam, L
                 
                 if (g_settings.AccentColorize)
                     g_settings.AccentColorize = GetAccentColor(g_settings.AccentColor);
+
+                for (HBRUSH brush : g_themeCachedCustomSysColorBrushes)
+                    DeleteObject(brush);
                 
                 if (g_settings.SetSystemColors)
                     ColorizeSysColors();
@@ -6366,9 +6367,12 @@ VOID LoadWindowProcessRules()
                 g_settings.AccentColorize = GetAccentColor(g_settings.AccentColor);
             
             g_settings.SetSystemColors = Wh_GetIntSetting(L"RuledPrograms[%d].RenderingMod.Syscolors", i);
-            // Check if custom system colors have been already applied, 
-            // not need to hook if custom system colors haven't been applied
-            if (!g_settings.SetSystemColors && GetSysColor_orig(COLOR_WINDOW) == RGB(0, 0, 0)) {
+
+            BOOL globalSetting_SetSystenColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
+
+            // Reset system colors to default values ​​if the "New system colors" setting is disabled for the specific ruled process.
+            // Hook all necessary API to restore system colors.
+            if (!g_settings.SetSystemColors && globalSetting_SetSystenColors) {
                 g_DefaultSysColors = TRUE;
                 WindhawkUtils::SetFunctionHook(GetSysColor, HookedGetSysColor, &GetSysColor_orig);
                 WindhawkUtils::SetFunctionHook(GetSysColorBrush, HookedGetSysColorBrush, &GetSysColorBrush_orig);
@@ -6465,7 +6469,7 @@ VOID Wh_ModUninit(VOID)
         DeleteAtom(g_explorerStylerNoBackgroundEffectAtom);
      
     g_settings.Unload = TRUE;
-    if (g_settings.FillBg)
+    if (g_settings.FillBg && g_d2dFactory)
         g_d2dFactory->Release();
     
     if (g_settings.SetSystemColors)
