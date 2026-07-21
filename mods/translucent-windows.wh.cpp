@@ -6358,11 +6358,11 @@ VOID LoadWindowProcessRules()
             
             g_settings.SetSystemColors = Wh_GetIntSetting(L"RuledPrograms[%d].RenderingMod.Syscolors", i);
 
-            BOOL globalSetting_SetSystenColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
+            BOOL globalSetting_SetSystemColors = Wh_GetIntSetting(L"RenderingMod.Syscolors");
 
             // Reset system colors to default values if the system color setting is disabled for the specific ruled process,
             // Hook all necessary API to restore system colors
-            if (!g_settings.SetSystemColors && globalSetting_SetSystenColors) {
+            if (!g_settings.SetSystemColors && globalSetting_SetSystemColors) {
                 g_DefaultSysColors = TRUE;
                 WindhawkUtils::SetFunctionHook(GetSysColor, HookedGetSysColor, &GetSysColor_orig);
                 WindhawkUtils::SetFunctionHook(GetSysColorBrush, HookedGetSysColorBrush, &GetSysColorBrush_orig);
