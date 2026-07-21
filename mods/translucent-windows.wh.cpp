@@ -184,7 +184,7 @@ This is caused by default by the AccentBlur API.❕
 #define RECTWIDTH(lprc)     ((lprc)->right - (lprc)->left)
 #define RECTHEIGHT(lprc)    ((lprc)->bottom - (lprc)->top)
 
-static UINT ENABLE = 1;
+static constexpr UINT ENABLE = 1;
 static constexpr UINT AUTO = 0; // DWMSBT_AUTO
 //static constexpr UINT NONE = 1; // DWMSBT_NONE
 static constexpr UINT MAINWINDOW = 2; // DWMSBT_MAINWINDOW
@@ -599,10 +599,6 @@ std::wstring GetCurrProcStr() {
 
 BOOL InExplorerProcess() {
     return GetCurrProcStr() == L"explorer.exe";
-}
-
-BOOL InWindhawkProcess() {
-    return GetCurrProcStr() == L"windhawk.exe";
 }
 
 BOOL InTaskManagerProcess() {
@@ -1723,7 +1719,6 @@ public:
 
     BOOL CreateDIB(HDC& elementHdc, INT Width, INT Height)
     {
-        Wh_Log(L"CreateDIB");
         if (elementHdc)
             DeleteHDC(elementHdc);
 
@@ -5213,7 +5208,7 @@ HRESULT STDCALL Hooked_GetBrushesForPart(HTHEME hTheme, int iPartId, COLORREF Co
             return S_OK; 
         }
 
-        // 2. Assign a pure black brush. GetStockObject is safer here than 
+        // 2. Assign a pure black brush.
         // CreateSolidBrush because the stock object cannot be accidentally destroyed.
         if (phBrush) {
             *phBrush = (HBRUSH)GetStockObject(BLACK_BRUSH);
