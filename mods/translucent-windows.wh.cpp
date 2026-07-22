@@ -199,7 +199,6 @@ UINT GetDpiFromMonitor()
     return USER_DEFAULT_SCREEN_DPI;
 }
 UINT g_Dpi = GetDpiFromMonitor();
-SRWLOCK g_DpiChangeLock = SRWLOCK_INIT;
 
 typedef HRESULT(WINAPI* pDrawTextWithGlow)(HDC hdcMem, LPWSTR pszText, UINT cch, RECT* pRect, DWORD dwFlags, COLORREF crText,
                                           COLORREF crGlow, UINT nGlowRadius, UINT nGlowIntensity, BOOL fPreMultiply,
@@ -836,7 +835,7 @@ std::wstring GetThemeClass(HTHEME hTheme)
 static std::array<BYTE, 256> g_textAlphaGammaLUT = {0};
 VOID GenerateTextAlphaGammaLUT()
 {
-    for (int i = 0; i < 256; ++i) 
+    for (INT i = 0; i < 256; ++i) 
     {
         float a = i * (1.0f / 255.0f);
         float g = powf(a, 1.0f / 1.4f);
@@ -870,7 +869,7 @@ BOOL WINAPI HookedExtTextOutW(
     // Boundary calculations
     if (lprect)
         textRect = *lprect;
-    else if (options == ETO_GLYPH_INDEX)
+    else if (options & ETO_GLYPH_INDEX)
     {
         if (GetTextExtentPointI(hdc, (WORD*)lpString, c, &textSize))
         {
@@ -919,7 +918,7 @@ BOOL WINAPI HookedExtTextOutW(
     }
 
     RGBQUAD* pPixels = nullptr;
-    int rowWidth = 0; // stride in RGBQUADs, not bytes
+    INT rowWidth = 0; // stride in RGBQUADs, not bytes
     if (FAILED(GetBufferedPaintBits(hpb, &pPixels, &rowWidth))) {
         EndBufferedPaint(hpb, FALSE); // was missing on this path - leaked hpb
         Wh_Log(L"Failed GetBufferedPaintBits error:0x%08x", GetLastError());
@@ -999,7 +998,7 @@ HRESULT WINAPI HookedDrawTextWithGlow(HDC hdcMem, LPWSTR pszText, UINT cch, RECT
     return hr;
 }
 
-INT WINAPI HookedDrawTextW(HDC hdc, LPCWSTR lpchText, int cchText, LPRECT lprc, UINT format)
+INT WINAPI HookedDrawTextW(HDC hdc, LPCWSTR lpchText, INT cchText, LPRECT lprc, UINT format)
 {   
     // Windows 11 context menus use Fluent icons as glyphs
     // Handled internally in the shell32 routine s_DrawGlyph()
@@ -2460,7 +2459,7 @@ BOOL CThemeCache::CacheCommandlinkButton(INT iStateId, INT stateIndex)
     }
     auto hr = pRenderTarget->EndDraw();
     if (FAILED(hr)) {Wh_Log(L"Failed D2D drawing [ERROR]: 0x%08X\n", hr); return FALSE;}
-    return FALSE;
+    return TRUE;
 }
 
 BOOL PaintCommandLinkGlyph(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
@@ -2717,7 +2716,7 @@ BOOL PaintListBox(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     if (!g_d2dFactory)
         return FALSE;
 
-    ID2D1DCRenderTarget* pRenderTarget = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
     if (FAILED(CreateBoundD2DRenderTarget(hdc, pRect, g_d2dFactory, &pRenderTarget)))
         return FALSE;
 
@@ -2765,7 +2764,7 @@ BOOL PaintDropDownArrow(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect, BOOL 
         && iPartId != CP_DROPDOWNBUTTONLEFT))
         return FALSE;
 
-    ID2D1DCRenderTarget* pRenderTarget = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
     if (FAILED(CreateBoundD2DRenderTarget(hdc, pRect, g_d2dFactory, &pRenderTarget)))
         return FALSE;
 
@@ -4290,7 +4289,7 @@ BOOL PaintToolbarSplitDropDown(HDC hdc, INT iPartId,  INT iStateId, LPCRECT pRec
     FLOAT cornerRadius = 4.f * scale;
     INT width = RECTWIDTH(pRect), height = RECTHEIGHT(pRect);
 
-    ID2D1DCRenderTarget* pRenderTarget = nullptr;
+    Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
     if (FAILED(CreateBoundD2DRenderTarget(hdc, pRect, g_d2dFactory, &pRenderTarget)))
         return FALSE;
 
@@ -4495,7 +4494,7 @@ BOOL CThemeCache::CacheDragDrop()
 
     auto hr = pRenderTarget->EndDraw();
     if (FAILED(hr)) {Wh_Log(L"Failed D2D drawing [ERROR]: 0x%08X\n", hr); return FALSE;}
-    return FALSE;
+    return TRUE;
 }
 
 BOOL PaintSpinArrowGlyph(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
@@ -4945,7 +4944,8 @@ HRESULT WINAPI HookedDrawThemeBackgroundEx(
     return hr;
 }
 
-HRESULT WINAPI HookedDrawThemeEdge(HTHEME hTheme, HDC hdc, int iPartId, int iStateId, const RECT *pDestRect, UINT uEdge, UINT uFlags, RECT *pContentRect)
+// Remove white rect below menubar (e.g. seen in mmc.exe)
+HRESULT WINAPI HookedDrawThemeEdge(HTHEME hTheme, HDC hdc, INT iPartId, INT iStateId, const RECT *pDestRect, UINT uEdge, UINT uFlags, RECT *pContentRect)
 {
     std::wstring ThemeClass = GetThemeClass(hTheme);
 
@@ -5088,8 +5088,13 @@ static LRESULT WINAPI HookedDefWindowProcW(HWND hWnd, UINT msg, WPARAM wParam, L
                 if (g_settings.AccentColorize)
                     g_settings.AccentColorize = GetAccentColor(g_settings.AccentColor);
 
-                for (HBRUSH brush : g_themeCachedCustomSysColorBrushes)
-                    DeleteObject(brush);
+                AcquireSRWLockExclusive(&g_SysColorsLock);
+                for (HBRUSH& brush : g_themeCachedCustomSysColorBrushes) {
+                    if (brush) { 
+                        DeleteObject(brush); brush = nullptr; 
+                    }
+                }
+                ReleaseSRWLockExclusive(&g_SysColorsLock);
             }
             
             ReleaseSRWLockExclusive(&g_ThemeChangeLock);
@@ -5172,7 +5177,7 @@ HRESULT WINAPI HookedGetThemeTransitionDuration(HTHEME hTheme, INT iPartId, INT 
 #define SSTDCALL L"__stdcall"
 #endif
 
-LRESULT (STDCALL *CThemeMenu_MenuKeyboardMsgProc_orig)(INT code, WPARAM wParam, LPARAM lParam);
+LRESULT (STDCALL *CThemeMenu_MenuKeyboardMsgProc_orig)(INT, WPARAM, LPARAM);
 LRESULT STDCALL HookedCThemeMenu_MenuKeyboardMsgProc_orig(INT code, WPARAM wParam, LPARAM lParam)
 {
     auto res = CThemeMenu_MenuKeyboardMsgProc_orig(code, wParam, lParam);
@@ -5192,8 +5197,8 @@ LRESULT STDCALL HookedCThemeMenu_MenuKeyboardMsgProc_orig(INT code, WPARAM wPara
     return res;
 }
 
-HRESULT (STDCALL *_GetBrushesForPart_orig)(HTHEME hTheme, int iPartId, COLORREF Color, HBITMAP *phBitmap, HBRUSH *phBrush);
-HRESULT STDCALL Hooked_GetBrushesForPart(HTHEME hTheme, int iPartId, COLORREF Color, HBITMAP *phBitmap, HBRUSH *phBrush)
+HRESULT (__fastcall *_GetBrushesForPart_orig)(HTHEME, INT, COLORREF, HBITMAP*, HBRUSH*);
+HRESULT __fastcall Hooked_GetBrushesForPart(HTHEME hTheme, INT iPartId, COLORREF Color, HBITMAP *phBitmap, HBRUSH *phBrush)
 {
     std::wstring ThemeClass = GetThemeClass(hTheme);
     
@@ -5257,7 +5262,7 @@ void __fastcall Hooked_BorderRect(HDC hdc, COLORREF color, LPRECT pRect, INT cxT
 VOID UxThemeHooks(BOOL isFlyoutEffectEnabled)
 {
     WindhawkUtils::SYMBOL_HOOK uxtheme_dll_hooks[] =
-    {        
+    {    
         {
             {
                 #ifdef _WIN64
@@ -5331,7 +5336,8 @@ VOID RestoreWindowCustomizations(HWND hWnd)
     winCompositionAttrib.pvData = &accentPolicy;
     winCompositionAttrib.cbData = sizeof(accentPolicy);
 
-    SetWindowCompositionAttribute(hWnd, &winCompositionAttrib);
+    if (SetWindowCompositionAttribute)
+        SetWindowCompositionAttribute(hWnd, &winCompositionAttrib);
     
     DWM_SYSTEMBACKDROP_TYPE backdrop = DWMSBT_NONE;
     DwmSetWindowAttribute(hWnd, DWMWA_SYSTEMBACKDROP_TYPE , &backdrop, sizeof(UINT));
@@ -5653,7 +5659,7 @@ void __fastcall HookedRenderTooltip(HWND hWnd, HDC hdc, HGDIOBJ *a3)
 VOID User32Hooks(BOOL areSysColorsApplied)
 {
     WindhawkUtils::SYMBOL_HOOK user32_dll_hooks[] =
-    {  
+    {
         {
             {
                 #ifdef _WIN64
@@ -5719,8 +5725,8 @@ VOID User32Hooks(BOOL areSysColorsApplied)
     }
 }
 
-void (__fastcall *SHThemeDrawText_orig)(void*, HDC, int, int, DTTOPTS*, LPCWSTR, LPRECT, int, UINT, int, __int64, COLORREF, COLORREF a13);
-void __fastcall Hooked_SHThemeDrawText(void *a1, HDC a2, int a3, int a4, DTTOPTS *a5, LPCWSTR lpString, LPRECT lprc, int a8, UINT format, int a10, __int64 a11, COLORREF color, COLORREF a13)
+void (__fastcall *SHThemeDrawText_orig)(void*, HDC, INT, INT, DTTOPTS*, LPCWSTR, LPRECT, INT, UINT, INT, __int64, COLORREF, COLORREF);
+void __fastcall Hooked_SHThemeDrawText(void *a1, HDC a2, INT a3, INT a4, DTTOPTS *a5, LPCWSTR lpString, LPRECT lprc, INT a8, UINT format, INT a10, __int64 a11, COLORREF color, COLORREF a13)
 {
     if (!g_InsideTaskMgrProc)
         color = g_IsSysThemeDarkMode && (color & 0x00ffffff) <= RGB(96, 96, 96) ? RGB(255, 255, 255) : !g_IsSysThemeDarkMode ? RGB(0, 0, 0) : color;
@@ -5731,8 +5737,8 @@ void __fastcall Hooked_SHThemeDrawText(void *a1, HDC a2, int a3, int a4, DTTOPTS
 }
 
 // Alpha blend highlighted text rectangle
-void (__fastcall *SHThemeFillTextRect_orig)(HDC hDC, RECT *lprc, COLORREF color, INT sysColorCode);
-void __fastcall HookedSHThemeFillTextRect(HDC hDC, RECT *lprc, COLORREF color, INT sysColorCode)
+void (__fastcall *SHThemeFillTextRect_orig)(HDC, LPRECT, COLORREF, INT);
+void __fastcall HookedSHThemeFillTextRect(HDC hDC, LPRECT lprc, COLORREF color, INT sysColorCode)
 {
     if (color != GetSysColor(COLOR_HIGHLIGHT))
         return SHThemeFillTextRect_orig(hDC, lprc, color, sysColorCode);
@@ -5754,8 +5760,8 @@ void __fastcall HookedSHThemeFillTextRect(HDC hDC, RECT *lprc, COLORREF color, I
 }
 
 // Alpha blend highlighted text rectangle
-COLORREF (__fastcall *FillRectClr_orig)(HDC hdc, RECT *lprect, COLORREF color);
-COLORREF __fastcall HookedFillRectClr(HDC hdc, RECT *lprect, COLORREF color)
+COLORREF (__fastcall *FillRectClr_orig)(HDC, LPRECT, COLORREF);
+COLORREF __fastcall HookedFillRectClr(HDC hdc, LPRECT lprect, COLORREF color)
 {
     if (color != GetSysColor(COLOR_HIGHLIGHT))
         return FillRectClr_orig(hdc, lprect, color);
@@ -6045,8 +6051,8 @@ void RecolorBrandingLogoBackground(HBITMAP hbm)
 
 // Intercept the windows branding logo image (e.g winver, shutdown dialog, regedit etc.)
 // Winver loads the bitmap using LoadAboutBitmaps() routine, shutdown dialog using LoadBrandingBitmap().
-HANDLE (__fastcall *BrandingLoadImage_orig)(LPCWSTR pszBrand, UINT uID, UINT type, int cx, int cy, UINT  fuLoad);
-HANDLE __fastcall HookedBrandingLoadImage(LPCWSTR pszBrand, UINT uID, UINT type, int cx, int cy, UINT  fuLoad)
+HANDLE (STDCALL *BrandingLoadImage_orig)(LPCWSTR, UINT, UINT, INT, INT, UINT);
+HANDLE STDCALL HookedBrandingLoadImage(LPCWSTR pszBrand, UINT uID, UINT type, INT cx, INT cy, UINT  fuLoad)
 {    
     auto hImage = BrandingLoadImage_orig(pszBrand, uID, type, cx, cy, fuLoad);
 
@@ -6265,7 +6271,7 @@ std::wstring NormalizeRule(std::wstring path)
 
     // 3. Lowercase
     LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_LOWERCASE, 
-                  path.c_str(), (int)path.length(), &path[0], (int)path.length(), 
+                  path.c_str(), (INT)path.length(), &path[0], (INT)path.length(), 
                   nullptr, nullptr, 0);
 
     return path;
@@ -6297,8 +6303,8 @@ CurrentProcessInfo GetCurrentProcessInfo()
 
     // Lowercase the main string once
     LCMapStringEx(LOCALE_NAME_USER_DEFAULT, LCMAP_LOWERCASE, 
-                  info.fullPath.c_str(), (int)info.fullPath.length(), 
-                  &info.fullPath[0], (int)info.fullPath.length(), 
+                  info.fullPath.c_str(), (INT)info.fullPath.length(), 
+                  &info.fullPath[0], (INT)info.fullPath.length(), 
                   nullptr, nullptr, 0);
 
     // Extract substrings cleanly 
@@ -6386,6 +6392,8 @@ VOID LoadWindowProcessRules()
                 g_settings.BgType = g_settings.Default;
 
             GetColorSetting(WindhawkUtils::StringSetting(Wh_GetStringSetting(L"RuledPrograms[%d].BackgroundEffects.AccentBlurBehind", i)), g_settings.AccentBlurBehindClr);
+            
+            break;
         }
     }
 }
@@ -6472,10 +6480,18 @@ VOID Wh_ModUninit(VOID)
     if (g_settings.SetSystemColors)
         RevertSysColors();
 
-    for (HBRUSH brush : g_themeCachedCustomSysColorBrushes)
-        DeleteObject(brush);
-    for (HBRUSH brush : g_themeCachedDefaultSysColorBrushes)
-        DeleteObject(brush);
+    for (size_t i = 0; i < g_themeCachedDefaultSysColorBrushes.size(); i++) {
+        HBRUSH& brushCustom = g_themeCachedCustomSysColorBrushes[i];
+        HBRUSH& brushDefault = g_themeCachedDefaultSysColorBrushes[i];
+        if (brushCustom) { 
+            DeleteObject(brushCustom); 
+            brushCustom = nullptr; 
+        }
+        if (brushDefault) { 
+            DeleteObject(brushDefault); 
+            brushDefault = nullptr; 
+        }
+    }
 
     ApplyForExistingWindows();
 }
