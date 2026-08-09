@@ -4872,7 +4872,14 @@ HRESULT WINAPI HookedDrawThemeBackgroundEx(
 {    
     std::wstring ThemeClassName = GetThemeClass(hTheme);
 
-    if (ThemeClassName == L"ListView")
+    if (ThemeClassName == L"ScrollBar")
+    {
+        if (PaintScroll(hdc, iPartId, iStateId, pRect))
+            return S_OK;
+        else if (PaintScrollBarArrows(hdc, iPartId, iStateId, pRect))
+            return S_OK;
+    }
+    else if (ThemeClassName == L"ListView")
     {
         if (PaintListView(hdc, iPartId, iStateId, pRect))
             return S_OK;
