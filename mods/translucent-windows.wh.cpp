@@ -1737,7 +1737,7 @@ public:
     BOOL CacheCombobox(INT, INT, INT);
     BOOL CacheEditBox(INT, INT, INT);
     BOOL CacheTreeViewButton(INT, INT, INT);
-    BOOL CacheTreeViewGlyph(INT, INT, INT, BOOL);
+    BOOL CacheTreeViewGlyph(INT, INT, INT, BOOL, INT, INT);
     BOOL CacheItemsView(INT, INT, INT);
     BOOL CacheProgressBar(INT, INT, INT);
     BOOL CacheIndeterminateBar(INT, INT);
@@ -3593,34 +3593,56 @@ BOOL PaintTreeViewGlyph(HDC hdc, INT iPartId, INT iStateId, LPCRECT pRect)
     if (!g_d2dFactory || (iPartId != TVP_GLYPH && iPartId != TVP_HOTGLYPH))
         return FALSE;
 
+    INT width = RECTWIDTH(pRect);
+    INT height = RECTHEIGHT(pRect);
+    if (width <= 0 || height <= 0)
+        return FALSE;
+
     FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
-    FLOAT width = RECTWIDTH(pRect);
 
     // TreeView glyph symbols have a fixed bitmap size (marked as SIZINGTYPE=TRUESIZE)
     // The TreeView theme class has a bitmap size of 9x9px, while the Explorer::TreeView theme class has a bitmap size of 16x16px
     // Unfortunately, OpenThemeData only detects the parent TreeView theme class
-    BOOL ExplorerTreeView = FALSE;
-    if (width / (16 * scale) == 1)
-        ExplorerTreeView = TRUE;
+    INT expectedExplorer = lroundf(16.0f * scale);
+    INT expectedNormal = lroundf(9.0f * scale);
+    BOOL ExplorerTreeView = abs(width - expectedExplorer) <= abs(width - expectedNormal);
 
-    INT index = (iPartId == TVP_GLYPH) ? index = iStateId - 1 : index = iStateId + 1;
+    INT index = (iPartId == TVP_GLYPH) ? iStateId - 1 : iStateId + 1;
     index = (ExplorerTreeView) ? index + 4 : index;
 
+    // Recreate the cached glyph if the physical target size has changed
+    if (g_themeCache.treeviewglyph[index])
+    {
+        HBITMAP hBitmap = static_cast<HBITMAP>(GetCurrentObject(g_themeCache.treeviewglyph[index], OBJ_BITMAP));
+        BITMAP bitmapInfo {};
+        BOOL dimensionsMatch = FALSE;
+
+        if (hBitmap && GetObject(hBitmap, sizeof(bitmapInfo), &bitmapInfo))
+            dimensionsMatch = bitmapInfo.bmWidth == width && bitmapInfo.bmHeight == height;
+
+        if (!dimensionsMatch)
+        {
+            g_themeCache.DeleteHDC(g_themeCache.treeviewglyph[index]);
+        }
+    }
+
     if (!g_themeCache.treeviewglyph[index])
-        if (!g_themeCache.CacheTreeViewGlyph(iPartId, iStateId, index, ExplorerTreeView))
+        if (!g_themeCache.CacheTreeViewGlyph(iPartId, iStateId, index, ExplorerTreeView, width, height))
             return FALSE;
-    DrawNineGridStretch(hdc, g_themeCache.treeviewglyph[index], pRect);
+
+    // The glyph is already rasterized at the final physical size, draw it 1:1 without resampling
+    BLENDFUNCTION blend {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    if (!AlphaBlend(hdc, pRect->left, pRect->top, width, height,
+                    g_themeCache.treeviewglyph[index], 0, 0, width, height, blend))
+        return FALSE;
+
     return TRUE;
 }
 
-BOOL CThemeCache::CacheTreeViewGlyph(INT iPartId, INT iStateId, INT stateIndex, BOOL ExplorerTreeView)
+BOOL CThemeCache::CacheTreeViewGlyph(INT iPartId, INT iStateId, INT stateIndex, BOOL ExplorerTreeView, INT width, INT height)
 {
-    FLOAT scale = (FLOAT)g_Dpi / USER_DEFAULT_SCREEN_DPI;
-    INT width = 9 * scale;
-    INT height = 9 * scale;
-
-    if (ExplorerTreeView)
-        width = height = 16 * scale;
+    if (width <= 0 || height <= 0)
+        return FALSE;
 
     if (!g_themeCache.CreateDIB(g_themeCache.treeviewglyph[stateIndex], width, height))
         return FALSE;
@@ -3629,7 +3651,7 @@ BOOL CThemeCache::CacheTreeViewGlyph(INT iPartId, INT iStateId, INT stateIndex, 
     Microsoft::WRL::ComPtr<ID2D1DCRenderTarget> pRenderTarget;
     if (FAILED(CreateBoundD2DRenderTarget(g_themeCache.treeviewglyph[stateIndex], &rc, g_d2dFactory, &pRenderTarget)))
         return FALSE;
-    
+
     D2D1_COLOR_F arrowColor;
     if (iPartId == TVP_HOTGLYPH) {
         if (iStateId == HGLPS_CLOSED) arrowColor =  MyD2D1Color(255, 255, 255);
@@ -3643,32 +3665,51 @@ BOOL CThemeCache::CacheTreeViewGlyph(INT iPartId, INT iStateId, INT stateIndex, 
     Microsoft::WRL::ComPtr<ID2D1SolidColorBrush> arrowBrush;
     pRenderTarget->CreateSolidColorBrush(arrowColor, &arrowBrush);
 
-    FLOAT centerX = width / 2.f;
-    FLOAT centerY = height / 2.f;
-    FLOAT arrowLength = (ExplorerTreeView) ? width * 0.3f : width * 0.55f;
-    // 60 degrees
+    // Derive the effective DPI scale from the actual physical target size
+    FLOAT logicalSize = (ExplorerTreeView) ? 16.0f : 9.0f;
+    FLOAT scaleX = static_cast<FLOAT>(width) / logicalSize;
+    FLOAT scaleY = static_cast<FLOAT>(height) / logicalSize;
+    FLOAT scale = (scaleX + scaleY) * 0.5f;
+
+    FLOAT arrowLength = ((ExplorerTreeView) ? 16.0f * 0.3f : 9.0f * 0.55f) * scale;
     FLOAT dx = arrowLength * 0.866f;
     FLOAT dy = arrowLength * 0.5f;
 
-    D2D1_POINT_2F ptTip, ptLeft, ptRight;
+    // Snap the stroke and coordinates to the physical pixel grid
+    FLOAT strokeWidth = roundf(1.5f * scale);
+    if (strokeWidth < 1.0f)
+        strokeWidth = 1.0f;
 
-    if (iStateId == GLPS_OPENED)
+    INT strokePixels = static_cast<INT>(strokeWidth);
+    FLOAT pixelOffset = (strokePixels & 1) ? 0.5f : 0.0f;
+
+    auto SnapCoordinate = [pixelOffset](FLOAT value) -> FLOAT {
+        return roundf(value - pixelOffset) + pixelOffset;
+    };
+
+    FLOAT centerX = SnapCoordinate(static_cast<FLOAT>(width) * 0.5f);
+    FLOAT centerY = SnapCoordinate(static_cast<FLOAT>(height) * 0.5f);
+
+    D2D1_POINT_2F ptTip, ptLeft, ptRight;
+    BOOL opened = (iStateId == GLPS_OPENED || iStateId == HGLPS_OPENED);
+
+    if (opened)
     {
-        ptTip   = {centerX, centerY + dy};
-        ptLeft  = {centerX - dx, centerY - dy};
-        ptRight = {centerX + dx, centerY - dy};
+        ptTip   = {SnapCoordinate(centerX), SnapCoordinate(centerY + dy)};
+        ptLeft  = {SnapCoordinate(centerX - dx), SnapCoordinate(centerY - dy)};
+        ptRight = {SnapCoordinate(centerX + dx), SnapCoordinate(centerY - dy)};
     }
-    else if (iStateId == GLPS_CLOSED)
+    else
     {
-        ptTip   = { centerX + dy, centerY };
-        ptLeft  = { centerX - dy, centerY - dx };
-        ptRight = { centerX - dy, centerY + dx };
+        ptTip   = {SnapCoordinate(centerX + dy), SnapCoordinate(centerY)};
+        ptLeft  = {SnapCoordinate(centerX - dy), SnapCoordinate(centerY - dx)};
+        ptRight = {SnapCoordinate(centerX - dy), SnapCoordinate(centerY + dx)};
     }
 
     pRenderTarget->BeginDraw();
 
-    pRenderTarget->DrawLine(ptLeft, ptTip, arrowBrush.Get(), 1.5f * scale);
-    pRenderTarget->DrawLine(ptRight, ptTip, arrowBrush.Get(), 1.5f * scale);
+    pRenderTarget->DrawLine(ptLeft, ptTip, arrowBrush.Get(), strokeWidth);
+    pRenderTarget->DrawLine(ptRight, ptTip, arrowBrush.Get(), strokeWidth);
 
     auto hr = pRenderTarget->EndDraw();
     if (FAILED(hr)) {Wh_Log(L"Failed D2D drawing [ERROR]: 0x%08X\n", hr); return FALSE;}
