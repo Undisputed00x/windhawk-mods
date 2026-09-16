@@ -1,7 +1,9 @@
 // ==WindhawkMod==
 // @id              translucent-windows
 // @name            Translucent Windows
+// @name:zh-CN      半透明窗口效果
 // @description     Enables native translucent effects in Windows 11
+// @description:zh-CN 在 Windows 11 中启用原生半透明（模糊、亚克力、云母）视觉效果，可自定义主题、系统颜色与弹出菜单外观。
 // @version         1.8.2
 // @author          Undisputed00x
 // @github          https://github.com/Undisputed00x
@@ -88,82 +90,146 @@ This is caused by default by the AccentBlur API.❕
 - RenderingMod:
     - ThemeBackground: TRUE
       $name: 🔷 Windows theme custom rendering
+      $name:zh-CN: 🔷 Windows 主题自定义渲染
       $description: >-
        Modifies parts of the Windows theme using the Direct2D graphics API and modifies 
        Windows GDI text rendering by patching the alpha channel and adjusting text colors.
         ✨It is recommended to enable this with background translucent effects.
+      $description:zh-CN: >-
+       使用 Direct2D 图形 API 修改部分 Windows 主题，并通过修补 alpha 通道、调整文字颜色
+       来修改 Windows GDI 文字渲染。
+       ✨建议与背景半透明效果一同启用。
     - SysColors: FALSE
       $name: 🔷 New system colors
+      $name:zh-CN: 🔷 新的系统颜色
       $description: >-
        Modifies additional system UI colors by calling SetSysColors API. (Requires Windows theme custom rendering)
         ⚠️For issues with excluded processes, use process rules in mod's settings. For more refer to the FAQ.
+      $description:zh-CN: >-
+       通过调用 SetSysColors API 修改额外的系统界面颜色。（需启用 Windows 主题自定义渲染）
+       ⚠️若被排除的进程出现问题，请改用 mod 设置中的进程规则。更多信息请参阅常见问题。
     - AccentColorControls: TRUE
       $name: 🔷 Windows theme accent colorizer
+      $name:zh-CN: 🔷 Windows 主题强调色着色
       $description: >-
        Paint with accent color parts of windows theme. (Requires Windows theme custom rendering)
+      $description:zh-CN: >-
+       使用强调色绘制部分 Windows 主题。（需启用 Windows 主题自定义渲染）
   $name: 🔶 Theme Customization
+  $name:zh-CN: 🔶 主题自定义
 - BackgroundEffects:
     - type: acrylicblur
       $name: 🔷 Background effects
+      $name:zh-CN: 🔷 背景效果
       $description: >-
         Windows 11 version >= 22621.xxx (22H2) is required for SystemBackdrop effects.
+      $description:zh-CN: >-
+       SystemBackdrop 效果需要 Windows 11 版本 >= 22621.xxx（22H2）。
       $options:
       - none: Default
       - acrylicblur: Blur (AccentBlurBehind)
       - acrylicsystem: Acrylic (SystemBackdrop)
       - mica: Mica (SystemBackdrop)
       - mica_tabbed: MicaAlt (SystemBackdrop)
+      $options:zh-CN:
+      - none: 默认
+      - acrylicblur: 模糊 (AccentBlurBehind)
+      - acrylicsystem: 亚克力 (SystemBackdrop)
+      - mica: 云母 (SystemBackdrop)
+      - mica_tabbed: 云母 Alt (SystemBackdrop)
     - AccentBlurBehind: "3A232323"
       $name: 🔷 AccentBlurBehind color blend
+      $name:zh-CN: 🔷 AccentBlurBehind 颜色混合
       $description: >-
         Blending color with blur background.
         Color in hexadecimal ARGB format e.g. 3A232323
+      $description:zh-CN: >-
+       与模糊背景混合的颜色。
+       颜色使用十六进制 ARGB 格式，例如 3A232323
   $name: 🔶 Translucent Effects
+  $name:zh-CN: 🔶 半透明效果
 - FlyoutsEffects: TRUE
   $name: 🔶 Flyout effects
+  $name:zh-CN: 🔶 弹出菜单效果
   $description: >-
     Expand the effects to Win32 flyouts (context menus, dropdown menus, tooltips)
      ✨It is recommended to enable this with both background translucent effects and Windows theme custom rendering.
+  $description:zh-CN: >-
+   将效果扩展到 Win32 弹出菜单（右键菜单、下拉菜单、工具提示）。
+   ✨建议同时启用背景半透明效果与 Windows 主题自定义渲染。
 - RuledPrograms:
     - - target: "Notepad.exe"
         $name: 🔶 Process
+        $name:zh-CN: 🔶 进程
         $description: >-
          Entries can be process names, paths or subdirectories for example:
           • Notepad.exe
           • C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE
           • C:\Users
+        $description:zh-CN: >-
+         条目可以是进程名、路径或子目录，例如：
+         • Notepad.exe
+         • C:\Program Files\Microsoft Office\root\Office16\EXCEL.EXE
+         • C:\Users
       - RenderingMod:
           - ThemeBackground: FALSE
             $name: 🔷 Windows theme custom rendering
+            $name:zh-CN: 🔷 Windows 主题自定义渲染
             $description: >-
               Modifies parts of the Windows theme using the Direct2D graphics API and modifies Windows GDI text rendering by patching the alpha channel and adjusting text colors.
                ✨It is recommended to enable this with background translucent effects.
+            $description:zh-CN: >-
+             使用 Direct2D 图形 API 修改部分 Windows 主题，并通过修补 alpha 通道、调整文字颜色
+             来修改 Windows GDI 文字渲染。
+             ✨建议与背景半透明效果一同启用。
           - AccentColorControls: FALSE
             $name: 🔷 Windows theme accent colorizer
+            $name:zh-CN: 🔷 Windows 主题强调色着色
             $description: >-
               Paint with accent color parts of windows theme. (Requires Windows theme custom rendering)
+            $description:zh-CN: >-
+             使用强调色绘制部分 Windows 主题。（需启用 Windows 主题自定义渲染）
         $name: 🔶 Theme Customization
+        $name:zh-CN: 🔶 主题自定义
       - BackgroundEffects:
         - type: none
           $name: 🔷 Background translucent effects
+          $name:zh-CN: 🔷 背景半透明效果
           $description: >-
            Windows 11 version >= 22621.xxx (22H2) is required for SystemBackdrop effects.
+          $description:zh-CN: >-
+           SystemBackdrop 效果需要 Windows 11 版本 >= 22621.xxx（22H2）。
           $options:
           - none: Default
           - acrylicblur: Blur (AccentBlurBehind)
           - acrylicsystem: Acrylic (SystemBackdrop)
           - mica: Mica (SystemBackdrop)
           - mica_tabbed: MicaAlt (SystemBackdrop)
+          $options:zh-CN:
+          - none: 默认
+          - acrylicblur: 模糊 (AccentBlurBehind)
+          - acrylicsystem: 亚克力 (SystemBackdrop)
+          - mica: 云母 (SystemBackdrop)
+          - mica_tabbed: 云母 Alt (SystemBackdrop)
         - AccentBlurBehind: "3A232323"
           $name: 🔷 AccentBlurBehind color blend
+          $name:zh-CN: 🔷 AccentBlurBehind 颜色混合
           $description: >-
            Blending color with blur background.
             Color in hexadecimal ARGB format e.g. 3A232323
+          $description:zh-CN: >-
+           与模糊背景混合的颜色。
+           颜色使用十六进制 ARGB 格式，例如 3A232323
         $name: 🔶 Translucent Effects
+        $name:zh-CN: 🔶 半透明效果
   $name: ⏩ Process Rules
+  $name:zh-CN: ⏩ 进程规则
   $description: >-
       Add rules to each specified process or processes from specific subdirectories
        ❗ Add process rules for the excluded process instead of using Windhawk's process exclusion when the "New system colors" global setting is enabled.
+  $description:zh-CN: >-
+   为每个指定进程或特定子目录中的进程添加规则。
+   ❗ 当启用「新的系统颜色」全局设置时，请为被排除的进程添加进程规则，而不要使用 Windhawk 的进程排除功能。
 */
 // ==/WindhawkModSettings==
 
